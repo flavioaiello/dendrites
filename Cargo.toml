@@ -1,5 +1,5 @@
 [package]
-name = "domcp"
+name = "dendrites"
 version = "0.1.0"
 edition = "2021"
 description = "Domain Model Context Protocol Server - Architectural meta-layer for GitHub Copilot"
@@ -13,5 +13,5 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+cozo = { package = "cozo-ce", version = "0.7.13-alpha.3", default-features = false, features = ["minimal", "rayon"] }
 dirs = "5"

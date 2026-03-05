@@ -1,8 +1,8 @@
 {
     "servers": {
-        "domcp": {
+        "dendrites": {
             "type": "stdio",
-            "command": "~/.cargo/bin/domcp",
+            "command": "~/.cargo/bin/dendrites",
             "args": ["serve", "--workspace", "${workspaceFolder}"]
         }
     }

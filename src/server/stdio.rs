@@ -8,14 +8,8 @@ use crate::store::Store;
 
 /// List of write-tool names used to route `tools/call` to the mutable path.
 const WRITE_TOOLS: &[&str] = &[
-    "update_bounded_context",
-    "update_entity",
-    "update_service",
-    "update_event",
-    "remove_entity",
-    "compare_model",
-    "draft_refactoring_plan",
-    "save_model",
+    "set_model",
+    "refactor",
 ];
 
 /// Run the MCP server over stdio (stdin/stdout), the standard transport for
@@ -25,7 +19,7 @@ pub async fn run(mut model: DomainModel, workspace_path: String, store: Store) -
     let mut stdout = io::stdout();
     let mut lines = stdin.lines();
 
-    tracing::info!("DOMCP stdio transport ready");
+    tracing::info!("Dendrites stdio transport ready");
 
     while let Some(line) = lines.next_line().await? {
         let line = line.trim().to_string();
@@ -72,7 +66,7 @@ fn handle_request(
                     prompts: Some(PromptsCapability {}),
                 },
                 server_info: ServerInfo {
-                    name: format!("domcp ({})", model.name),
+                    name: format!("dendrites ({})", model.name),
                     version: env!("CARGO_PKG_VERSION").into(),
                 },
             };
@@ -116,7 +110,7 @@ fn handle_request(
             let result = if WRITE_TOOLS.contains(&params.name.as_str()) {
                 write_tools::call_write_tool(model, workspace_path, store, &params.name, &params.arguments)
             } else {
-                tools::call_tool(model, &params.name, &params.arguments)
+                tools::call_tool(model, store, workspace_path, &params.name, &params.arguments)
             };
             JsonRpcResponse::success(req.id.clone(), serde_json::to_value(result).unwrap())
         }
@@ -183,7 +177,7 @@ fn handle_request(
                 }
             };
 
-            match prompts::get_prompt(model, &params.name) {
+            match prompts::get_prompt(model, store, workspace_path, &params.name) {
                 Some(result) => {
                     JsonRpcResponse::success(req.id.clone(), serde_json::to_value(result).unwrap())
                 }

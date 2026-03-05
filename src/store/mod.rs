@@ -1,3 +1,3 @@
-pub mod sqlite;
+pub mod cozo;
 
-pub use sqlite::Store;
+pub use cozo::Store;

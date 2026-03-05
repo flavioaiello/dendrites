@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "domcp", about = "Domain Model Context Protocol Server")]
+#[command(name = "dendrites", about = "Domain Model Context Protocol Server")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -23,7 +23,7 @@ enum Commands {
         workspace: String,
     },
 
-    /// Import a domcp.json file into the store for a workspace
+    /// Import a dendrites.json file into the store for a workspace
     Import {
         /// Path to the JSON file to import
         file: String,
@@ -59,17 +59,17 @@ async fn main() -> Result<()> {
     match cli.command {
         // Default: serve
         None => {
-            eprintln!("Usage: domcp serve --workspace <path>");
-            eprintln!("       domcp import <file> --workspace <path>");
-            eprintln!("       domcp export <file> --workspace <path>");
-            eprintln!("       domcp list");
+            eprintln!("Usage: dendrites serve --workspace <path>");
+            eprintln!("       dendrites import <file> --workspace <path>");
+            eprintln!("       dendrites export <file> --workspace <path>");
+            eprintln!("       dendrites list");
             std::process::exit(1);
         }
 
         Some(Commands::Serve { workspace }) => {
             let store = store::Store::open_default()?;
 
-            let model = match store.load(&workspace)? {
+            let model = match store.load_desired(&workspace)? {
                 Some(m) => {
                     tracing::info!(
                         "Loaded model '{}' for workspace: {}",
@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
             };
 
             tracing::info!(
-                "DOMCP Server starting with {} bounded contexts, {} entities",
+                "Dendrites Server starting with {} bounded contexts, {} entities",
                 model.bounded_contexts.len(),
                 model
                     .bounded_contexts
@@ -123,7 +123,7 @@ async fn main() -> Result<()> {
             if projects.is_empty() {
                 eprintln!("No projects in store.");
             } else {
-                eprintln!("{:<50} {:<25} {}", "WORKSPACE", "PROJECT", "UPDATED");
+                eprintln!("{:<50} {:<25} UPDATED", "WORKSPACE", "PROJECT");
                 eprintln!("{}", "-".repeat(95));
                 for p in &projects {
                     eprintln!(

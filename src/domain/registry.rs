@@ -17,32 +17,6 @@ impl<'a> DomainRegistry<'a> {
             .find(|bc| bc.name.eq_ignore_ascii_case(name))
     }
 
-    pub fn find_entity(&self, name: &str) -> Option<(&BoundedContext, &Entity)> {
-        for bc in &self.model.bounded_contexts {
-            if let Some(entity) = bc.entities.iter().find(|e| e.name.eq_ignore_ascii_case(name)) {
-                return Some((bc, entity));
-            }
-        }
-        None
-    }
-
-    pub fn find_service(&self, name: &str) -> Option<(&BoundedContext, &Service)> {
-        for bc in &self.model.bounded_contexts {
-            if let Some(svc) = bc.services.iter().find(|s| s.name.eq_ignore_ascii_case(name)) {
-                return Some((bc, svc));
-            }
-        }
-        None
-    }
-
-    pub fn context_names(&self) -> Vec<&str> {
-        self.model
-            .bounded_contexts
-            .iter()
-            .map(|bc| bc.name.as_str())
-            .collect()
-    }
-
     /// Produce a structured JSON summary for Copilot context injection.
     /// Compact and machine-readable — no prose, just data.
     pub fn architecture_summary(&self) -> String {

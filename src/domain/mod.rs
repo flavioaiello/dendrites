@@ -9,7 +9,7 @@ pub fn to_snake(s: &str) -> String {
     for (i, &ch) in chars.iter().enumerate() {
         if ch.is_uppercase() && i > 0 {
             let prev_lower = chars[i - 1].is_lowercase();
-            let next_lower = chars.get(i + 1).map_or(false, |c| c.is_lowercase());
+            let next_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
             if prev_lower || next_lower {
                 result.push('_');
             }

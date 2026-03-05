@@ -2,23 +2,23 @@ use crate::domain::model::DomainModel;
 use crate::domain::registry::DomainRegistry;
 use crate::mcp::protocol::*;
 
-/// Returns the list of resources the DOMCP server exposes.
+/// Returns the list of resources the Dendrites server exposes.
 pub fn list_resources(model: &DomainModel) -> Vec<ResourceDefinition> {
     let mut resources = vec![
         ResourceDefinition {
-            uri: "domcp://architecture/overview".into(),
+            uri: "dendrites://architecture/overview".into(),
             name: "Architecture Overview".into(),
-            description: "Complete architecture overview with all bounded contexts, entities, and rules".into(),
+            description: "Architecture overview of the desired domain model with bounded contexts, entities, and rules".into(),
             mime_type: "application/json".into(),
         },
         ResourceDefinition {
-            uri: "domcp://architecture/rules".into(),
+            uri: "dendrites://architecture/rules".into(),
             name: "Architectural Rules".into(),
             description: "All architectural constraints and rules".into(),
             mime_type: "application/json".into(),
         },
         ResourceDefinition {
-            uri: "domcp://architecture/conventions".into(),
+            uri: "dendrites://architecture/conventions".into(),
             name: "Conventions".into(),
             description: "Naming, file structure, error handling, and testing conventions".into(),
             mime_type: "application/json".into(),
@@ -28,7 +28,7 @@ pub fn list_resources(model: &DomainModel) -> Vec<ResourceDefinition> {
     // Add per-context resources
     for bc in &model.bounded_contexts {
         resources.push(ResourceDefinition {
-            uri: format!("domcp://context/{}", bc.name.to_lowercase()),
+            uri: format!("dendrites://context/{}", bc.name.to_lowercase()),
             name: format!("Context: {}", bc.name),
             description: format!(
                 "Bounded context '{}' — entities, services, events",
@@ -46,17 +46,17 @@ pub fn read_resource(model: &DomainModel, uri: &str) -> ResourceReadResult {
     let registry = DomainRegistry::new(model);
 
     let (mime, text) = match uri {
-        "domcp://architecture/overview" => ("application/json", registry.architecture_summary()),
-        "domcp://architecture/rules" => (
+        "dendrites://architecture/overview" => ("application/json", registry.architecture_summary()),
+        "dendrites://architecture/rules" => (
             "application/json",
             serde_json::to_string(&model.rules).unwrap_or_default(),
         ),
-        "domcp://architecture/conventions" => (
+        "dendrites://architecture/conventions" => (
             "application/json",
             serde_json::to_string(&model.conventions).unwrap_or_default(),
         ),
-        _ if uri.starts_with("domcp://context/") => {
-            let ctx_name = uri.strip_prefix("domcp://context/").unwrap_or("");
+        _ if uri.starts_with("dendrites://context/") => {
+            let ctx_name = uri.strip_prefix("dendrites://context/").unwrap_or("");
             match registry.find_context(ctx_name) {
                 Some(bc) => (
                     "application/json",
@@ -112,14 +112,14 @@ mod tests {
         let resources = list_resources(&model);
         // 3 static + 1 per context
         assert_eq!(resources.len(), 4);
-        assert!(resources.iter().any(|r| r.uri == "domcp://architecture/overview"));
-        assert!(resources.iter().any(|r| r.uri == "domcp://context/identity"));
+        assert!(resources.iter().any(|r| r.uri == "dendrites://architecture/overview"));
+        assert!(resources.iter().any(|r| r.uri == "dendrites://context/identity"));
     }
 
     #[test]
     fn test_read_resource_overview() {
         let model = test_model();
-        let result = read_resource(&model, "domcp://architecture/overview");
+        let result = read_resource(&model, "dendrites://architecture/overview");
         assert_eq!(result.contents.len(), 1);
         assert_eq!(result.contents[0].mime_type, "application/json");
         assert!(result.contents[0].text.contains("TestProject"));
@@ -128,21 +128,21 @@ mod tests {
     #[test]
     fn test_read_resource_context() {
         let model = test_model();
-        let result = read_resource(&model, "domcp://context/identity");
+        let result = read_resource(&model, "dendrites://context/identity");
         assert!(result.contents[0].text.contains("Identity"));
     }
 
     #[test]
     fn test_read_resource_unknown() {
         let model = test_model();
-        let result = read_resource(&model, "domcp://unknown");
+        let result = read_resource(&model, "dendrites://unknown");
         assert!(result.contents[0].text.contains("Unknown resource"));
     }
 
     #[test]
     fn test_read_resource_context_not_found() {
         let model = test_model();
-        let result = read_resource(&model, "domcp://context/nonexistent");
+        let result = read_resource(&model, "dendrites://context/nonexistent");
         assert!(result.contents[0].text.contains("not found"));
     }
 }
