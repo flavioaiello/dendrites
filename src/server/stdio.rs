@@ -63,8 +63,15 @@ fn handle_request(
     match req.method.as_str() {
         // ── Lifecycle ──────────────────────────────────────────────
         "initialize" => {
+            // Echo back the client's requested protocol version for compatibility.
+            // Fall back to the baseline MCP spec version if not provided.
+            let client_version = req.params.as_ref()
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("2024-11-05");
+
             let result = InitializeResult {
-                protocol_version: "2025-03-26".into(),
+                protocol_version: client_version.into(),
                 capabilities: ServerCapabilities {
                     tools: Some(ToolsCapability {}),
                     resources: Some(ResourcesCapability {}),
