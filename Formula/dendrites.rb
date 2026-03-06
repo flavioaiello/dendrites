@@ -2,9 +2,9 @@ class Dendrites < Formula
   desc "Domain Model Context Protocol Server — architectural meta-layer for GitHub Copilot"
   homepage "https://github.com/flavioaiello/dendrites"
   license "MIT"
-  url "https://github.com/flavioaiello/dendrites/archive/refs/tags/v0.1.2.tar.gz"
-  sha256 "442292c7cef23f3e10334667b0d7ca7191ef05de8d3d4d3a4af8f14e3e5c616b"
-  version "0.1.2"
+  url "https://github.com/flavioaiello/dendrites/archive/refs/tags/v0.1.3.tar.gz"
+  # sha256 will be updated after the tag is published
+  version "0.1.3"
 
   head "https://github.com/flavioaiello/dendrites.git", branch: "main"
 
@@ -22,7 +22,7 @@ class Dendrites < Formula
 
   def caveats
     <<~EOS
-      Dendrites stores domain models in ~/.dendrites/dendrites.db (SQLite).
+      Dendrites stores domain models per-crate in <crate_root>/.dendrites/store.db (SQLite).
 
       To use with VS Code / GitHub Copilot, add to .vscode/mcp.json:
 
