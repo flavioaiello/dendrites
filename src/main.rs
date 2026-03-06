@@ -17,9 +17,9 @@ struct Cli {
 enum Commands {
     /// Start the MCP stdio server (default when no subcommand given)
     Serve {
-        /// Workspace path — auto-detected from VS Code via ${workspaceFolder}
+        /// Workspace path (defaults to current directory)
         #[arg(short, long)]
-        workspace: String,
+        workspace: Option<String>,
     },
 
     /// Import a dendrites.json file into the store for a workspace
@@ -69,17 +69,41 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Resolve workspace: explicit flag > cwd
+    let resolve_workspace = |w: Option<String>| -> String {
+        w.unwrap_or_else(|| {
+            std::env::current_dir()
+                .expect("cannot determine current directory")
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+
     match cli.command {
-        // Default: serve
+        // Default: serve from cwd
         None => {
-            eprintln!("Usage: dendrites serve --workspace <path>");
-            eprintln!("       dendrites import <file> --workspace <path>");
-            eprintln!("       dendrites export <file> --workspace <path>");
-            eprintln!("       dendrites list");
-            std::process::exit(1);
+            let workspace = resolve_workspace(None);
+            let store = std::sync::Arc::new(store::Store::open_default()?);
+            tracing::info!("Dendrites Server starting for workspace: {}", workspace);
+
+            let workspace_path = std::path::PathBuf::from(&workspace);
+            let watcher_store = std::sync::Arc::clone(&store);
+            let watcher = server::watcher::ActualStateWatcher::new(
+                workspace_path,
+                watcher_store,
+            );
+
+            tokio::spawn(async move {
+                if let Err(e) = watcher.spawn().await {
+                    tracing::error!("AST Watcher failed: {}", e);
+                }
+            });
+
+            server::stdio::run(workspace, store).await?;
         }
 
         Some(Commands::Serve { workspace }) => {
+            let workspace = resolve_workspace(workspace);
             let store = std::sync::Arc::new(store::Store::open_default()?);
             tracing::info!("Dendrites Server starting for workspace: {}", workspace);
 
