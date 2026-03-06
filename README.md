@@ -20,7 +20,7 @@ Without Dendrites, every new chat starts from zero. Copilot re-discovers your ar
 
 ### Copilot doesn't enforce architectural boundaries
 
-Left alone, Copilot will happily create a direct import from your domain layer into infrastructure, or skip aggregate roots entirely. Dendrites's `mcp_dendrites_scrutinize` and `mcp_dendrites_get_model` act as **guardrails that Copilot checks before generating code**. This is the highest-value feature — preventing architectural drift is expensive to fix later.
+Left alone, Copilot will happily create a direct import from your domain layer into infrastructure, or skip aggregate roots entirely. Dendrites's `mcp_dendrites_review` and `mcp_dendrites_get_model` act as **guardrails that Copilot checks before generating code**. This is the highest-value feature — preventing architectural drift is expensive to fix later.
 
 ### Actual vs Desired: explicit refactoring lifecycle
 
@@ -124,7 +124,7 @@ Once connected, Copilot gains access to **6 tools** (4 read, 2 write), **1 promp
 | Tool | What it does |
 |------|-------------|
 | `mcp_dendrites_get_model` | Returns both the actual and desired domain models, including pending changes status |
-| `mcp_dendrites_scrutinize` | Run Datalog-based analysis: transitive dependencies, layer violations, impact analysis, aggregate quality checks, and custom Datalog queries |
+| `mcp_dendrites_review` | Run Datalog-based analysis: transitive dependencies, layer violations, impact analysis, aggregate quality checks, and custom Datalog queries |
 
 ### Write Tools (update the desired model)
 
@@ -156,7 +156,7 @@ All mutations to the desired model are **auto-saved** to the local store.
 
 Copilot will:
 1. Call `mcp_dendrites_get_model` → sees actual + desired models, status "in_sync"
-2. Call `mcp_dendrites_scrutinize` (analysis: `layer_violations`) to ensure the request is valid
+2. Call `mcp_dendrites_review` (analysis: `layer_violations`) to ensure the request is valid
 3. Call `mcp_dendrites_set_model` to configure the new endpoint as a desired service, receiving auto-generated file paths 
 4. Generate code into the suggested path and run `mcp_dendrites_refactor` (action: `accept`)
 
@@ -213,7 +213,7 @@ Each workspace has two models:
 
 When a model is saved, Dendrites decomposes it into 16 CozoDB relations (context, entity, entity_field, entity_method, service, service_dep, event, invariant, etc.) that enable Datalog queries.
 
-### Built-in Analyses (via `mcp_dendrites_scrutinize` tool)
+### Built-in Analyses (via `mcp_dendrites_review` tool)
 
 | Analysis | What it finds |
 |----------|--------------|
@@ -245,7 +245,7 @@ This means:
 
 ## Architectural Enforcement
 
-Dendrites doesn't just inform — it **constrains**. The `mcp_dendrites_scrutinize` tool lets Copilot run mathematical proofs (Datalog queries) over your design, blocking illegal layer dependencies and ensuring architectural rules are respected before a line is written.
+Dendrites doesn't just inform — it **constrains**. The `mcp_dendrites_review` tool lets Copilot run mathematical proofs (Datalog queries) over your design, blocking illegal layer dependencies and ensuring architectural rules are respected before a line is written.
 
 Example rules from the included config:
 - **LAYER-001**: Domain layer must not depend on infrastructure
@@ -265,7 +265,7 @@ Before writing any code, ALWAYS call `mcp_dendrites_get_model` from the Dendrite
 server to understand actual and desired model state.
 
 When mutating models, rely on `mcp_dendrites_set_model` which will return suggested paths.
-Before large commits, verify dependency chains using `mcp_dendrites_scrutinize`.
+Before large commits, verify dependency chains using `mcp_dendrites_review`.
 Use `mcp_dendrites_refactor` to accept proposed desired state changes.
 ```
 

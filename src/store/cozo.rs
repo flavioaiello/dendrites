@@ -95,12 +95,23 @@ impl Store {
             // ── Domain element headers ──
             ":create context { workspace: String, name: String, state: String => description: String default '', module_path: String default '' }",
             ":create context_dep { workspace: String, from_ctx: String, to_ctx: String, state: String }",
+            ":create owner_meta { workspace: String, context: String, owner_kind: String, owner: String, state: String => team: String default '', owners_json: String default '[]', rationale: String default '' }",
+            ":create aggregate { workspace: String, context: String, name: String, state: String => description: String default '', root_entity: String default '' }",
+            ":create aggregate_member { workspace: String, context: String, aggregate: String, member_kind: String, member: String, state: String }",
             ":create entity { workspace: String, context: String, name: String, state: String => description: String default '', aggregate_root: Bool default false }",
+            ":create policy { workspace: String, context: String, name: String, state: String => description: String default '', kind: String default 'domain' }",
+            ":create policy_link { workspace: String, context: String, policy: String, link_kind: String, link: String, idx: Int, state: String }",
+            ":create read_model { workspace: String, context: String, name: String, state: String => description: String default '', source: String default '' }",
             ":create service { workspace: String, context: String, name: String, state: String => description: String default '', kind: String default 'domain' }",
             ":create service_dep { workspace: String, context: String, service: String, dep: String, state: String }",
             ":create event { workspace: String, context: String, name: String, state: String => description: String default '', source: String default '' }",
             ":create value_object { workspace: String, context: String, name: String, state: String => description: String default '' }",
             ":create repository { workspace: String, context: String, name: String, state: String => aggregate: String default '' }",
+            ":create external_system { workspace: String, name: String, state: String => description: String default '', kind: String default '', rationale: String default '' }",
+            ":create external_system_context { workspace: String, system: String, context: String, idx: Int, state: String }",
+            ":create architectural_decision { workspace: String, id: String, state: String => title: String default '', status: String default 'proposed', scope: String default '', date: String default '', rationale: String default '' }",
+            ":create decision_context { workspace: String, decision_id: String, context: String, idx: Int, state: String }",
+            ":create decision_consequence { workspace: String, decision_id: String, idx: Int, state: String => text: String default '' }",
             // ── First-class sub-structures ──
             ":create invariant { workspace: String, context: String, entity: String, idx: Int, state: String => text: String }",
             ":create field { workspace: String, context: String, owner_kind: String, owner: String, name: String, state: String => field_type: String default '', required: Bool default false, description: String default '', idx: Int default 0 }",
@@ -292,6 +303,59 @@ impl Store {
         Ok(())
     }
 
+    fn save_owner_meta(
+        &self,
+        ws: &str,
+        ctx: &str,
+        owner_kind: &str,
+        owner: &str,
+        ownership: &Ownership,
+        state: &str,
+    ) -> Result<()> {
+        let owners_json = serde_json::to_string(&ownership.owners).unwrap_or_else(|_| "[]".into());
+        self.db
+            .run_script(
+                "?[workspace, context, owner_kind, owner, state, team, owners_json, rationale] <- [[$ws, $ctx, $ok, $owner, $st, $team, $owners, $rationale]] :put owner_meta { workspace, context, owner_kind, owner, state => team, owners_json, rationale }",
+                params_map(&[
+                    ("ws", ws),
+                    ("ctx", ctx),
+                    ("ok", owner_kind),
+                    ("owner", owner),
+                    ("st", state),
+                    ("team", &ownership.team),
+                    ("owners", &owners_json),
+                    ("rationale", &ownership.rationale),
+                ]),
+                ScriptMutability::Mutable,
+            )
+            .map_err(|e| anyhow::anyhow!("save owner_meta '{}':'{}': {:?}", owner_kind, owner, e))?;
+        Ok(())
+    }
+
+    fn remove_owner_meta(&self, ws: &str, ctx: &str, owner_kind: &str, owner: &str) {
+        let _ = self.db.run_script(
+            "?[workspace, context, owner_kind, owner, state] := *owner_meta{workspace, context, owner_kind, owner, state}, workspace = $ws, context = $ctx, owner_kind = $ok, owner = $owner :rm owner_meta { workspace, context, owner_kind, owner, state }",
+            params_map(&[("ws", ws), ("ctx", ctx), ("ok", owner_kind), ("owner", owner)]),
+            ScriptMutability::Mutable,
+        );
+    }
+
+    fn replace_owner_fields(
+        &self,
+        ws: &str,
+        ctx: &str,
+        owner_kind: &str,
+        owner: &str,
+        fields: &[Field],
+    ) -> Result<()> {
+        let _ = self.db.run_script(
+            "?[workspace, context, owner_kind, owner, name, state] := *field{workspace, context, owner_kind, owner, name, state}, workspace = $ws, context = $ctx, owner_kind = $ok, owner = $owner, state = 'desired' :rm field { workspace, context, owner_kind, owner, name, state }",
+            params_map(&[("ws", ws), ("ctx", ctx), ("ok", owner_kind), ("owner", owner)]),
+            ScriptMutability::Mutable,
+        );
+        self.save_fields(ws, ctx, owner_kind, owner, fields, "desired")
+    }
+
     /// Query fields for a specific owner from the `field` relation, ordered by idx.
     fn query_fields(
         &self,
@@ -422,6 +486,51 @@ impl Store {
         indexed.into_iter().map(|(_, m)| m).collect()
     }
 
+    fn query_ownership(
+        &self,
+        ws: &str,
+        ctx: &str,
+        owner_kind: &str,
+        owner: &str,
+        state: &str,
+    ) -> Ownership {
+        let rows = self
+            .db
+            .run_script(
+                "?[team, owners_json, rationale] := *owner_meta{workspace: $ws, context: $ctx, owner_kind: $ok, owner: $owner, state: $st, team, owners_json, rationale}",
+                params_map(&[("ws", ws), ("ctx", ctx), ("ok", owner_kind), ("owner", owner), ("st", state)]),
+                ScriptMutability::Immutable,
+            )
+            .map(|r| r.rows)
+            .unwrap_or_default();
+
+        if let Some(row) = rows.first() {
+            let owners = serde_json::from_str::<Vec<String>>(&dv_str(&row[1])).unwrap_or_default();
+            Ownership {
+                team: dv_str(&row[0]),
+                owners,
+                rationale: dv_str(&row[2]),
+            }
+        } else {
+            Ownership::default()
+        }
+    }
+
+    fn query_indexed_strings(&self, query: &str, params: BTreeMap<String, cozo::DataValue>) -> Vec<String> {
+        let rows = self
+            .db
+            .run_script(query, params, ScriptMutability::Immutable)
+            .map(|r| r.rows)
+            .unwrap_or_default();
+
+        let mut indexed: Vec<(i64, String)> = rows
+            .iter()
+            .map(|row| (dv_i64(&row[0]), dv_str(&row[1])))
+            .collect();
+        indexed.sort_by_key(|(idx, _)| *idx);
+        indexed.into_iter().map(|(_, value)| value).collect()
+    }
+
     /// Query invariants for an entity, ordered by idx.
     fn query_invariants(
         &self,
@@ -491,9 +600,9 @@ impl Store {
     /// Decompose a DomainModel into relational rows tagged with `state`.
     fn save_state(&self, workspace: &str, model: &DomainModel, state: &str) -> Result<()> {
         self.clear_state(workspace, state)?;
+        self.save_owner_meta(workspace, "", "project", &model.name, &model.ownership, state)?;
 
         for bc in &model.bounded_contexts {
-            // ── Context header ──
             let params = params_map(&[
                 ("ws", workspace),
                 ("name", &bc.name),
@@ -501,205 +610,201 @@ impl Store {
                 ("desc", &bc.description),
                 ("mp", &bc.module_path),
             ]);
-            self.db
-                .run_script(
-                    "?[workspace, name, state, description, module_path] <- \
-                        [[$ws, $name, $st, $desc, $mp]] \
-                     :put context { workspace, name, state => description, module_path }",
+            self.db.run_script(
+                "?[workspace, name, state, description, module_path] <- [[$ws, $name, $st, $desc, $mp]] :put context { workspace, name, state => description, module_path }",
+                params,
+                ScriptMutability::Mutable,
+            ).map_err(|e| anyhow::anyhow!("save context '{}': {:?}", bc.name, e))?;
+
+            self.save_owner_meta(workspace, &bc.name, "context", &bc.name, &bc.ownership, state)?;
+
+            for dep in &bc.dependencies {
+                self.db.run_script(
+                    "?[workspace, from_ctx, to_ctx, state] <- [[$ws, $from, $to, $st]] :put context_dep { workspace, from_ctx, to_ctx, state }",
+                    params_map(&[("ws", workspace), ("from", &bc.name), ("to", dep), ("st", state)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save context_dep: {:?}", e))?;
+            }
+
+            for aggregate in &bc.aggregates {
+                self.db.run_script(
+                    "?[workspace, context, name, state, description, root_entity] <- [[$ws, $ctx, $name, $st, $desc, $root]] :put aggregate { workspace, context, name, state => description, root_entity }",
+                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &aggregate.name), ("st", state), ("desc", &aggregate.description), ("root", &aggregate.root_entity)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save aggregate '{}': {:?}", aggregate.name, e))?;
+                self.save_owner_meta(workspace, &bc.name, "aggregate", &aggregate.name, &aggregate.ownership, state)?;
+                for entity in &aggregate.entities {
+                    self.db.run_script(
+                        "?[workspace, context, aggregate, member_kind, member, state] <- [[$ws, $ctx, $agg, 'entity', $member, $st]] :put aggregate_member { workspace, context, aggregate, member_kind, member, state }",
+                        params_map(&[("ws", workspace), ("ctx", &bc.name), ("agg", &aggregate.name), ("member", entity), ("st", state)]),
+                        ScriptMutability::Mutable,
+                    ).map_err(|e| anyhow::anyhow!("save aggregate entity member: {:?}", e))?;
+                }
+                for value_object in &aggregate.value_objects {
+                    self.db.run_script(
+                        "?[workspace, context, aggregate, member_kind, member, state] <- [[$ws, $ctx, $agg, 'value_object', $member, $st]] :put aggregate_member { workspace, context, aggregate, member_kind, member, state }",
+                        params_map(&[("ws", workspace), ("ctx", &bc.name), ("agg", &aggregate.name), ("member", value_object), ("st", state)]),
+                        ScriptMutability::Mutable,
+                    ).map_err(|e| anyhow::anyhow!("save aggregate value_object member: {:?}", e))?;
+                }
+            }
+
+            for entity in &bc.entities {
+                let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &entity.name), ("st", state), ("desc", &entity.description)]);
+                params.insert("agg".into(), cozo::DataValue::Bool(entity.aggregate_root));
+                self.db.run_script(
+                    "?[workspace, context, name, state, description, aggregate_root] <- [[$ws, $ctx, $name, $st, $desc, $agg]] :put entity { workspace, context, name, state => description, aggregate_root }",
                     params,
                     ScriptMutability::Mutable,
-                )
-                .map_err(|e| anyhow::anyhow!("save context '{}': {:?}", bc.name, e))?;
-
-            // ── Context dependencies ──
-            for dep in &bc.dependencies {
-                let params = params_map(&[
-                    ("ws", workspace),
-                    ("from", &bc.name),
-                    ("to", dep),
-                    ("st", state),
-                ]);
-                self.db
-                    .run_script(
-                        "?[workspace, from_ctx, to_ctx, state] <- [[$ws, $from, $to, $st]] \
-                         :put context_dep { workspace, from_ctx, to_ctx, state }",
-                        params,
-                        ScriptMutability::Mutable,
-                    )
-                    .map_err(|e| anyhow::anyhow!("save context_dep: {:?}", e))?;
-            }
-
-            // ── Entities ──
-            for entity in &bc.entities {
-                let mut params = params_map(&[
-                    ("ws", workspace),
-                    ("ctx", &bc.name),
-                    ("name", &entity.name),
-                    ("st", state),
-                    ("desc", &entity.description),
-                ]);
-                params.insert("agg".into(), cozo::DataValue::Bool(entity.aggregate_root));
-                self.db
-                    .run_script(
-                        "?[workspace, context, name, state, description, aggregate_root] <- \
-                            [[$ws, $ctx, $name, $st, $desc, $agg]] \
-                         :put entity { workspace, context, name, state => description, aggregate_root }",
-                        params,
-                        ScriptMutability::Mutable,
-                    )
-                    .map_err(|e| anyhow::anyhow!("save entity '{}': {:?}", entity.name, e))?;
-
+                ).map_err(|e| anyhow::anyhow!("save entity '{}': {:?}", entity.name, e))?;
                 self.save_fields(workspace, &bc.name, "entity", &entity.name, &entity.fields, state)?;
                 self.save_methods(workspace, &bc.name, "entity", &entity.name, &entity.methods, state)?;
-
                 for (idx, inv) in entity.invariants.iter().enumerate() {
-                    let mut params = params_map(&[
-                        ("ws", workspace),
-                        ("ctx", &bc.name),
-                        ("ent", &entity.name),
-                        ("st", state),
-                        ("text", inv),
-                    ]);
+                    let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("ent", &entity.name), ("st", state), ("text", inv)]);
                     params.insert("idx".into(), int_dv(idx as i64));
-                    self.db
-                        .run_script(
-                            "?[workspace, context, entity, idx, state, text] <- \
-                                [[$ws, $ctx, $ent, $idx, $st, $text]] \
-                             :put invariant { workspace, context, entity, idx, state => text }",
-                            params,
-                            ScriptMutability::Mutable,
-                        )
-                        .map_err(|e| anyhow::anyhow!("save invariant: {:?}", e))?;
+                    self.db.run_script(
+                        "?[workspace, context, entity, idx, state, text] <- [[$ws, $ctx, $ent, $idx, $st, $text]] :put invariant { workspace, context, entity, idx, state => text }",
+                        params,
+                        ScriptMutability::Mutable,
+                    ).map_err(|e| anyhow::anyhow!("save invariant: {:?}", e))?;
                 }
             }
 
-            // ── Services ──
+            for policy in &bc.policies {
+                let kind_str = format!("{:?}", policy.kind).to_lowercase();
+                self.db.run_script(
+                    "?[workspace, context, name, state, description, kind] <- [[$ws, $ctx, $name, $st, $desc, $kind]] :put policy { workspace, context, name, state => description, kind }",
+                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &policy.name), ("st", state), ("desc", &policy.description), ("kind", &kind_str)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save policy '{}': {:?}", policy.name, e))?;
+                self.save_owner_meta(workspace, &bc.name, "policy", &policy.name, &policy.ownership, state)?;
+                for (idx, trigger) in policy.triggers.iter().enumerate() {
+                    let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("policy", &policy.name), ("link", trigger), ("st", state)]);
+                    params.insert("idx".into(), int_dv(idx as i64));
+                    self.db.run_script(
+                        "?[workspace, context, policy, link_kind, link, idx, state] <- [[$ws, $ctx, $policy, 'trigger', $link, $idx, $st]] :put policy_link { workspace, context, policy, link_kind, link, idx, state }",
+                        params,
+                        ScriptMutability::Mutable,
+                    ).map_err(|e| anyhow::anyhow!("save policy trigger: {:?}", e))?;
+                }
+                for (idx, command) in policy.commands.iter().enumerate() {
+                    let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("policy", &policy.name), ("link", command), ("st", state)]);
+                    params.insert("idx".into(), int_dv(idx as i64));
+                    self.db.run_script(
+                        "?[workspace, context, policy, link_kind, link, idx, state] <- [[$ws, $ctx, $policy, 'command', $link, $idx, $st]] :put policy_link { workspace, context, policy, link_kind, link, idx, state }",
+                        params,
+                        ScriptMutability::Mutable,
+                    ).map_err(|e| anyhow::anyhow!("save policy command: {:?}", e))?;
+                }
+            }
+
+            for read_model in &bc.read_models {
+                self.db.run_script(
+                    "?[workspace, context, name, state, description, source] <- [[$ws, $ctx, $name, $st, $desc, $src]] :put read_model { workspace, context, name, state => description, source }",
+                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &read_model.name), ("st", state), ("desc", &read_model.description), ("src", &read_model.source)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save read_model '{}': {:?}", read_model.name, e))?;
+                self.save_owner_meta(workspace, &bc.name, "read_model", &read_model.name, &read_model.ownership, state)?;
+                self.save_fields(workspace, &bc.name, "read_model", &read_model.name, &read_model.fields, state)?;
+            }
+
             for svc in &bc.services {
                 let kind_str = format!("{:?}", svc.kind).to_lowercase();
-                let params = params_map(&[
-                    ("ws", workspace),
-                    ("ctx", &bc.name),
-                    ("name", &svc.name),
-                    ("st", state),
-                    ("desc", &svc.description),
-                    ("kind", &kind_str),
-                ]);
-                self.db
-                    .run_script(
-                        "?[workspace, context, name, state, description, kind] <- \
-                            [[$ws, $ctx, $name, $st, $desc, $kind]] \
-                         :put service { workspace, context, name, state => description, kind }",
-                        params,
-                        ScriptMutability::Mutable,
-                    )
-                    .map_err(|e| anyhow::anyhow!("save service '{}': {:?}", svc.name, e))?;
-
+                self.db.run_script(
+                    "?[workspace, context, name, state, description, kind] <- [[$ws, $ctx, $name, $st, $desc, $kind]] :put service { workspace, context, name, state => description, kind }",
+                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &svc.name), ("st", state), ("desc", &svc.description), ("kind", &kind_str)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save service '{}': {:?}", svc.name, e))?;
                 self.save_methods(workspace, &bc.name, "service", &svc.name, &svc.methods, state)?;
-
                 for dep in &svc.dependencies {
-                    let params = params_map(&[
-                        ("ws", workspace),
-                        ("ctx", &bc.name),
-                        ("svc", &svc.name),
-                        ("dep", dep),
-                        ("st", state),
-                    ]);
-                    self.db
-                        .run_script(
-                            "?[workspace, context, service, dep, state] <- [[$ws, $ctx, $svc, $dep, $st]] \
-                             :put service_dep { workspace, context, service, dep, state }",
-                            params,
-                            ScriptMutability::Mutable,
-                        )
-                        .map_err(|e| anyhow::anyhow!("save service_dep: {:?}", e))?;
+                    self.db.run_script(
+                        "?[workspace, context, service, dep, state] <- [[$ws, $ctx, $svc, $dep, $st]] :put service_dep { workspace, context, service, dep, state }",
+                        params_map(&[("ws", workspace), ("ctx", &bc.name), ("svc", &svc.name), ("dep", dep), ("st", state)]),
+                        ScriptMutability::Mutable,
+                    ).map_err(|e| anyhow::anyhow!("save service_dep: {:?}", e))?;
                 }
             }
 
-            // ── Events ──
             for evt in &bc.events {
-                let params = params_map(&[
-                    ("ws", workspace),
-                    ("ctx", &bc.name),
-                    ("name", &evt.name),
-                    ("st", state),
-                    ("desc", &evt.description),
-                    ("src", &evt.source),
-                ]);
-                self.db
-                    .run_script(
-                        "?[workspace, context, name, state, description, source] <- \
-                            [[$ws, $ctx, $name, $st, $desc, $src]] \
-                         :put event { workspace, context, name, state => description, source }",
-                        params,
-                        ScriptMutability::Mutable,
-                    )
-                    .map_err(|e| anyhow::anyhow!("save event '{}': {:?}", evt.name, e))?;
-
+                self.db.run_script(
+                    "?[workspace, context, name, state, description, source] <- [[$ws, $ctx, $name, $st, $desc, $src]] :put event { workspace, context, name, state => description, source }",
+                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &evt.name), ("st", state), ("desc", &evt.description), ("src", &evt.source)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save event '{}': {:?}", evt.name, e))?;
                 self.save_fields(workspace, &bc.name, "event", &evt.name, &evt.fields, state)?;
             }
 
-            // ── Value Objects ──
             for vo in &bc.value_objects {
-                let params = params_map(&[
-                    ("ws", workspace),
-                    ("ctx", &bc.name),
-                    ("name", &vo.name),
-                    ("st", state),
-                    ("desc", &vo.description),
-                ]);
-                self.db
-                    .run_script(
-                        "?[workspace, context, name, state, description] <- \
-                            [[$ws, $ctx, $name, $st, $desc]] \
-                         :put value_object { workspace, context, name, state => description }",
-                        params,
-                        ScriptMutability::Mutable,
-                    )
-                    .map_err(|e| anyhow::anyhow!("save value_object '{}': {:?}", vo.name, e))?;
-
+                self.db.run_script(
+                    "?[workspace, context, name, state, description] <- [[$ws, $ctx, $name, $st, $desc]] :put value_object { workspace, context, name, state => description }",
+                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &vo.name), ("st", state), ("desc", &vo.description)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save value_object '{}': {:?}", vo.name, e))?;
                 self.save_fields(workspace, &bc.name, "value_object", &vo.name, &vo.fields, state)?;
-
                 for (idx, rule) in vo.validation_rules.iter().enumerate() {
-                    let mut p = params_map(&[
-                        ("ws", workspace),
-                        ("ctx", &bc.name),
-                        ("vo", &vo.name),
-                        ("st", state),
-                        ("text", rule),
-                    ]);
+                    let mut p = params_map(&[("ws", workspace), ("ctx", &bc.name), ("vo", &vo.name), ("st", state), ("text", rule)]);
                     p.insert("idx".into(), int_dv(idx as i64));
-                    self.db
-                        .run_script(
-                            "?[workspace, context, value_object, idx, state, text] <- \
-                                [[$ws, $ctx, $vo, $idx, $st, $text]] \
-                             :put vo_rule { workspace, context, value_object, idx, state => text }",
-                            p,
-                            ScriptMutability::Mutable,
-                        )
-                        .map_err(|e| anyhow::anyhow!("save vo_rule: {:?}", e))?;
+                    self.db.run_script(
+                        "?[workspace, context, value_object, idx, state, text] <- [[$ws, $ctx, $vo, $idx, $st, $text]] :put vo_rule { workspace, context, value_object, idx, state => text }",
+                        p,
+                        ScriptMutability::Mutable,
+                    ).map_err(|e| anyhow::anyhow!("save vo_rule: {:?}", e))?;
                 }
             }
 
-            // ── Repositories ──
             for repo in &bc.repositories {
-                let params = params_map(&[
-                    ("ws", workspace),
-                    ("ctx", &bc.name),
-                    ("name", &repo.name),
-                    ("st", state),
-                    ("agg", &repo.aggregate),
-                ]);
-                self.db
-                    .run_script(
-                        "?[workspace, context, name, state, aggregate] <- \
-                            [[$ws, $ctx, $name, $st, $agg]] \
-                         :put repository { workspace, context, name, state => aggregate }",
-                        params,
-                        ScriptMutability::Mutable,
-                    )
-                    .map_err(|e| anyhow::anyhow!("save repository '{}': {:?}", repo.name, e))?;
-
+                self.db.run_script(
+                    "?[workspace, context, name, state, aggregate] <- [[$ws, $ctx, $name, $st, $agg]] :put repository { workspace, context, name, state => aggregate }",
+                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &repo.name), ("st", state), ("agg", &repo.aggregate)]),
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save repository '{}': {:?}", repo.name, e))?;
                 self.save_methods(workspace, &bc.name, "repository", &repo.name, &repo.methods, state)?;
+            }
+        }
+
+        for system in &model.external_systems {
+            self.db.run_script(
+                "?[workspace, name, state, description, kind, rationale] <- [[$ws, $name, $st, $desc, $kind, $rationale]] :put external_system { workspace, name, state => description, kind, rationale }",
+                params_map(&[("ws", workspace), ("name", &system.name), ("st", state), ("desc", &system.description), ("kind", &system.kind), ("rationale", &system.rationale)]),
+                ScriptMutability::Mutable,
+            ).map_err(|e| anyhow::anyhow!("save external_system '{}': {:?}", system.name, e))?;
+            self.save_owner_meta(workspace, "", "external_system", &system.name, &system.ownership, state)?;
+            for (idx, ctx) in system.consumed_by_contexts.iter().enumerate() {
+                let mut params = params_map(&[("ws", workspace), ("name", &system.name), ("ctx", ctx), ("st", state)]);
+                params.insert("idx".into(), int_dv(idx as i64));
+                self.db.run_script(
+                    "?[workspace, system, context, idx, state] <- [[$ws, $name, $ctx, $idx, $st]] :put external_system_context { workspace, system, context, idx, state }",
+                    params,
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save external_system_context: {:?}", e))?;
+            }
+        }
+
+        for decision in &model.architectural_decisions {
+            let status = format!("{:?}", decision.status).to_lowercase();
+            self.db.run_script(
+                "?[workspace, id, state, title, status, scope, date, rationale] <- [[$ws, $id, $st, $title, $status, $scope, $date, $rationale]] :put architectural_decision { workspace, id, state => title, status, scope, date, rationale }",
+                params_map(&[("ws", workspace), ("id", &decision.id), ("st", state), ("title", &decision.title), ("status", &status), ("scope", &decision.scope), ("date", &decision.date), ("rationale", &decision.rationale)]),
+                ScriptMutability::Mutable,
+            ).map_err(|e| anyhow::anyhow!("save architectural_decision '{}': {:?}", decision.id, e))?;
+            self.save_owner_meta(workspace, "", "architectural_decision", &decision.id, &decision.ownership, state)?;
+            for (idx, ctx) in decision.contexts.iter().enumerate() {
+                let mut params = params_map(&[("ws", workspace), ("id", &decision.id), ("ctx", ctx), ("st", state)]);
+                params.insert("idx".into(), int_dv(idx as i64));
+                self.db.run_script(
+                    "?[workspace, decision_id, context, idx, state] <- [[$ws, $id, $ctx, $idx, $st]] :put decision_context { workspace, decision_id, context, idx, state }",
+                    params,
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save decision_context: {:?}", e))?;
+            }
+            for (idx, consequence) in decision.consequences.iter().enumerate() {
+                let mut params = params_map(&[("ws", workspace), ("id", &decision.id), ("text", consequence), ("st", state)]);
+                params.insert("idx".into(), int_dv(idx as i64));
+                self.db.run_script(
+                    "?[workspace, decision_id, idx, state, text] <- [[$ws, $id, $idx, $st, $text]] :put decision_consequence { workspace, decision_id, idx, state => text }",
+                    params,
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save decision_consequence: {:?}", e))?;
             }
         }
 
@@ -710,14 +815,25 @@ impl Store {
     fn clear_state(&self, workspace: &str, state: &str) -> Result<()> {
         let params = params_map(&[("ws", workspace), ("st", state)]);
         let tables = [
+            ("owner_meta", "workspace, context, owner_kind, owner, state"),
             ("context", "workspace, name, state"),
             ("context_dep", "workspace, from_ctx, to_ctx, state"),
+            ("aggregate", "workspace, context, name, state"),
+            ("aggregate_member", "workspace, context, aggregate, member_kind, member, state"),
             ("entity", "workspace, context, name, state"),
+            ("policy", "workspace, context, name, state"),
+            ("policy_link", "workspace, context, policy, link_kind, link, idx, state"),
+            ("read_model", "workspace, context, name, state"),
             ("service", "workspace, context, name, state"),
             ("service_dep", "workspace, context, service, dep, state"),
             ("event", "workspace, context, name, state"),
             ("value_object", "workspace, context, name, state"),
             ("repository", "workspace, context, name, state"),
+            ("external_system", "workspace, name, state"),
+            ("external_system_context", "workspace, system, context, idx, state"),
+            ("architectural_decision", "workspace, id, state"),
+            ("decision_context", "workspace, decision_id, context, idx, state"),
+            ("decision_consequence", "workspace, decision_id, idx, state"),
             ("invariant", "workspace, context, entity, idx, state"),
             ("field", "workspace, context, owner_kind, owner, name, state"),
             ("method", "workspace, context, owner_kind, owner, name, state"),
@@ -741,6 +857,10 @@ impl Store {
         let params = params_map(&[("ws", workspace), ("from", from), ("to", to)]);
 
         let scripts = vec![
+            // owner_meta
+            "src[ws, c, ok, ow, team, owners, rationale] := *owner_meta{workspace: ws, context: c, owner_kind: ok, owner: ow, state: $from, team, owners_json: owners, rationale}, ws = $ws \
+             ?[workspace, context, owner_kind, owner, state, team, owners_json, rationale] := src[workspace, context, owner_kind, owner, team, owners_json, rationale], state = $to \
+             :put owner_meta {workspace, context, owner_kind, owner, state => team, owners_json, rationale}",
             // context
             "src[ws, n, d, m] := *context{workspace: ws, name: n, state: $from, description: d, module_path: m}, ws = $ws \
              ?[workspace, name, state, description, module_path] := src[workspace, name, description, module_path], state = $to \
@@ -749,10 +869,30 @@ impl Store {
             "src[ws, f, t] := *context_dep{workspace: ws, from_ctx: f, to_ctx: t, state: $from}, ws = $ws \
              ?[workspace, from_ctx, to_ctx, state] := src[workspace, from_ctx, to_ctx], state = $to \
              :put context_dep {workspace, from_ctx, to_ctx, state}",
+            // aggregate
+            "src[ws, c, n, d, root] := *aggregate{workspace: ws, context: c, name: n, state: $from, description: d, root_entity: root}, ws = $ws \
+             ?[workspace, context, name, state, description, root_entity] := src[workspace, context, name, description, root_entity], state = $to \
+             :put aggregate {workspace, context, name, state => description, root_entity}",
+            // aggregate_member
+            "src[ws, c, a, mk, m] := *aggregate_member{workspace: ws, context: c, aggregate: a, member_kind: mk, member: m, state: $from}, ws = $ws \
+             ?[workspace, context, aggregate, member_kind, member, state] := src[workspace, context, aggregate, member_kind, member], state = $to \
+             :put aggregate_member {workspace, context, aggregate, member_kind, member, state}",
             // entity (no JSON columns)
             "src[ws, c, n, d, a] := *entity{workspace: ws, context: c, name: n, state: $from, description: d, aggregate_root: a}, ws = $ws \
              ?[workspace, context, name, state, description, aggregate_root] := src[workspace, context, name, description, aggregate_root], state = $to \
              :put entity {workspace, context, name, state => description, aggregate_root}",
+            // policy
+            "src[ws, c, n, d, k] := *policy{workspace: ws, context: c, name: n, state: $from, description: d, kind: k}, ws = $ws \
+             ?[workspace, context, name, state, description, kind] := src[workspace, context, name, description, kind], state = $to \
+             :put policy {workspace, context, name, state => description, kind}",
+            // policy_link
+            "src[ws, c, p, lk, l, i] := *policy_link{workspace: ws, context: c, policy: p, link_kind: lk, link: l, idx: i, state: $from}, ws = $ws \
+             ?[workspace, context, policy, link_kind, link, idx, state] := src[workspace, context, policy, link_kind, link, idx], state = $to \
+             :put policy_link {workspace, context, policy, link_kind, link, idx, state}",
+            // read_model
+            "src[ws, c, n, d, s] := *read_model{workspace: ws, context: c, name: n, state: $from, description: d, source: s}, ws = $ws \
+             ?[workspace, context, name, state, description, source] := src[workspace, context, name, description, source], state = $to \
+             :put read_model {workspace, context, name, state => description, source}",
             // service (no JSON columns)
             "src[ws, c, n, d, k] := *service{workspace: ws, context: c, name: n, state: $from, description: d, kind: k}, ws = $ws \
              ?[workspace, context, name, state, description, kind] := src[workspace, context, name, description, kind], state = $to \
@@ -773,6 +913,26 @@ impl Store {
             "src[ws, c, n, a] := *repository{workspace: ws, context: c, name: n, state: $from, aggregate: a}, ws = $ws \
              ?[workspace, context, name, state, aggregate] := src[workspace, context, name, aggregate], state = $to \
              :put repository {workspace, context, name, state => aggregate}",
+            // external_system
+            "src[ws, n, d, k, r] := *external_system{workspace: ws, name: n, state: $from, description: d, kind: k, rationale: r}, ws = $ws \
+             ?[workspace, name, state, description, kind, rationale] := src[workspace, name, description, kind, rationale], state = $to \
+             :put external_system {workspace, name, state => description, kind, rationale}",
+            // external_system_context
+            "src[ws, s, c, i] := *external_system_context{workspace: ws, system: s, context: c, idx: i, state: $from}, ws = $ws \
+             ?[workspace, system, context, idx, state] := src[workspace, system, context, idx], state = $to \
+             :put external_system_context {workspace, system, context, idx, state}",
+            // architectural_decision
+            "src[ws, id, title, status, scope, date, rationale] := *architectural_decision{workspace: ws, id, state: $from, title, status, scope, date, rationale}, ws = $ws \
+             ?[workspace, id, state, title, status, scope, date, rationale] := src[workspace, id, title, status, scope, date, rationale], state = $to \
+             :put architectural_decision {workspace, id, state => title, status, scope, date, rationale}",
+            // decision_context
+            "src[ws, id, c, i] := *decision_context{workspace: ws, decision_id: id, context: c, idx: i, state: $from}, ws = $ws \
+             ?[workspace, decision_id, context, idx, state] := src[workspace, decision_id, context, idx], state = $to \
+             :put decision_context {workspace, decision_id, context, idx, state}",
+            // decision_consequence
+            "src[ws, id, i, text] := *decision_consequence{workspace: ws, decision_id: id, idx: i, state: $from, text}, ws = $ws \
+             ?[workspace, decision_id, idx, state, text] := src[workspace, decision_id, idx, text], state = $to \
+             :put decision_consequence {workspace, decision_id, idx, state => text}",
             // invariant
             "src[ws, c, e, i, t] := *invariant{workspace: ws, context: c, entity: e, idx: i, state: $from, text: t}, ws = $ws \
              ?[workspace, context, entity, idx, state, text] := src[workspace, context, entity, idx, text], state = $to \
@@ -870,6 +1030,8 @@ impl Store {
             )
         };
 
+        let project_ownership = self.query_ownership(&ws, "", "project", &project_name, state);
+
         // Reconstruct each bounded context
         let mut bounded_contexts = Vec::new();
         for row in &ctxs.rows {
@@ -886,6 +1048,41 @@ impl Store {
                 .map(|r| r.rows)
                 .unwrap_or_default();
             let dependencies: Vec<String> = deps.iter().map(|r| dv_str(&r[0])).collect();
+
+            let ownership = self.query_ownership(&ws, &ctx_name, "context", &ctx_name, state);
+
+            let aggs = self
+                .db
+                .run_script(
+                    "?[name, description, root_entity] := *aggregate{workspace: $ws, context: $ctx, name, state: $st, description, root_entity}",
+                    params_map(&[("ws", &ws), ("ctx", &ctx_name), ("st", state)]),
+                    ScriptMutability::Immutable,
+                )
+                .map(|r| r.rows)
+                .unwrap_or_default();
+            let aggregates: Vec<Aggregate> = aggs
+                .iter()
+                .map(|r| {
+                    let aggregate_name = dv_str(&r[0]);
+                    let members = self
+                        .db
+                        .run_script(
+                            "?[member_kind, member] := *aggregate_member{workspace: $ws, context: $ctx, aggregate: $agg, member_kind, member, state: $st}",
+                            params_map(&[("ws", &ws), ("ctx", &ctx_name), ("agg", &aggregate_name), ("st", state)]),
+                            ScriptMutability::Immutable,
+                        )
+                        .map(|r| r.rows)
+                        .unwrap_or_default();
+                    Aggregate {
+                        name: aggregate_name.clone(),
+                        description: dv_str(&r[1]),
+                        root_entity: dv_str(&r[2]),
+                        entities: members.iter().filter(|m| dv_str(&m[0]) == "entity").map(|m| dv_str(&m[1])).collect(),
+                        value_objects: members.iter().filter(|m| dv_str(&m[0]) == "value_object").map(|m| dv_str(&m[1])).collect(),
+                        ownership: self.query_ownership(&ws, &ctx_name, "aggregate", &aggregate_name, state),
+                    }
+                })
+                .collect();
 
             // Entities
             let ents = self
@@ -910,6 +1107,68 @@ impl Store {
                         fields: self.query_fields(&ws, &ctx_name, "entity", &ename, state),
                         methods: self.query_methods(&ws, &ctx_name, "entity", &ename, state),
                         invariants: self.query_invariants(&ws, &ctx_name, &ename, state),
+                    }
+                })
+                .collect();
+
+            let policy_rows = self
+                .db
+                .run_script(
+                    "?[name, description, kind] := *policy{workspace: $ws, context: $ctx, name, state: $st, description, kind}",
+                    params_map(&[("ws", &ws), ("ctx", &ctx_name), ("st", state)]),
+                    ScriptMutability::Immutable,
+                )
+                .map(|r| r.rows)
+                .unwrap_or_default();
+            let policies: Vec<Policy> = policy_rows
+                .iter()
+                .map(|r| {
+                    let policy_name = dv_str(&r[0]);
+                    let links = self
+                        .db
+                        .run_script(
+                            "?[idx, link_kind, link] := *policy_link{workspace: $ws, context: $ctx, policy: $policy, idx, state: $st, link_kind, link}",
+                            params_map(&[("ws", &ws), ("ctx", &ctx_name), ("policy", &policy_name), ("st", state)]),
+                            ScriptMutability::Immutable,
+                        )
+                        .map(|r| r.rows)
+                        .unwrap_or_default();
+                    let mut indexed = links.iter().map(|row| (dv_i64(&row[0]), dv_str(&row[1]), dv_str(&row[2]))).collect::<Vec<_>>();
+                    indexed.sort_by_key(|(idx, _, _)| *idx);
+                    Policy {
+                        name: policy_name.clone(),
+                        description: dv_str(&r[1]),
+                        kind: match dv_str(&r[2]).as_str() {
+                            "process_manager" => PolicyKind::ProcessManager,
+                            "integration" => PolicyKind::Integration,
+                            _ => PolicyKind::Domain,
+                        },
+                        triggers: indexed.iter().filter(|(_, kind, _)| kind == "trigger").map(|(_, _, link)| link.clone()).collect(),
+                        commands: indexed.iter().filter(|(_, kind, _)| kind == "command").map(|(_, _, link)| link.clone()).collect(),
+                        ownership: self.query_ownership(&ws, &ctx_name, "policy", &policy_name, state),
+                    }
+                })
+                .collect();
+
+            let read_model_rows = self
+                .db
+                .run_script(
+                    "?[name, description, source] := *read_model{workspace: $ws, context: $ctx, name, state: $st, description, source}",
+                    params_map(&[("ws", &ws), ("ctx", &ctx_name), ("st", state)]),
+                    ScriptMutability::Immutable,
+                )
+                .map(|r| r.rows)
+                .unwrap_or_default();
+            let read_models: Vec<ReadModel> = read_model_rows
+                .iter()
+                .map(|r| {
+                    let read_name = dv_str(&r[0]);
+                    ReadModel {
+                        name: read_name.clone(),
+                        description: dv_str(&r[1]),
+                        source: dv_str(&r[2]),
+                        fields: self.query_fields(&ws, &ctx_name, "read_model", &read_name, state),
+                        ownership: self.query_ownership(&ws, &ctx_name, "read_model", &read_name, state),
                     }
                 })
                 .collect();
@@ -1034,6 +1293,10 @@ impl Store {
                 name: ctx_name,
                 description: dv_str(&row[1]),
                 module_path: dv_str(&row[2]),
+                ownership,
+                aggregates,
+                policies,
+                read_models,
                 entities,
                 value_objects,
                 services,
@@ -1043,15 +1306,347 @@ impl Store {
             });
         }
 
+        let external_system_rows = self
+            .db
+            .run_script(
+                "?[name, description, kind, rationale] := *external_system{workspace: $ws, name, state: $st, description, kind, rationale}",
+                params_map(&[("ws", &ws), ("st", state)]),
+                ScriptMutability::Immutable,
+            )
+            .map(|r| r.rows)
+            .unwrap_or_default();
+        let external_systems: Vec<ExternalSystem> = external_system_rows
+            .iter()
+            .map(|r| {
+                let system_name = dv_str(&r[0]);
+                ExternalSystem {
+                    name: system_name.clone(),
+                    description: dv_str(&r[1]),
+                    kind: dv_str(&r[2]),
+                    consumed_by_contexts: self.query_indexed_strings(
+                        "?[idx, context] := *external_system_context{workspace: $ws, system: $name, idx, state: $st, context}",
+                        params_map(&[("ws", &ws), ("name", &system_name), ("st", state)]),
+                    ),
+                    rationale: dv_str(&r[3]),
+                    ownership: self.query_ownership(&ws, "", "external_system", &system_name, state),
+                }
+            })
+            .collect();
+
+        let decision_rows = self
+            .db
+            .run_script(
+                "?[id, title, status, scope, date, rationale] := *architectural_decision{workspace: $ws, id, state: $st, title, status, scope, date, rationale}",
+                params_map(&[("ws", &ws), ("st", state)]),
+                ScriptMutability::Immutable,
+            )
+            .map(|r| r.rows)
+            .unwrap_or_default();
+        let architectural_decisions: Vec<ArchitecturalDecision> = decision_rows
+            .iter()
+            .map(|r| {
+                let decision_id = dv_str(&r[0]);
+                ArchitecturalDecision {
+                    id: decision_id.clone(),
+                    title: dv_str(&r[1]),
+                    status: match dv_str(&r[2]).as_str() {
+                        "accepted" => DecisionStatus::Accepted,
+                        "superseded" => DecisionStatus::Superseded,
+                        "deprecated" => DecisionStatus::Deprecated,
+                        _ => DecisionStatus::Proposed,
+                    },
+                    scope: dv_str(&r[3]),
+                    date: dv_str(&r[4]),
+                    rationale: dv_str(&r[5]),
+                    consequences: self.query_indexed_strings(
+                        "?[idx, text] := *decision_consequence{workspace: $ws, decision_id: $id, idx, state: $st, text}",
+                        params_map(&[("ws", &ws), ("id", &decision_id), ("st", state)]),
+                    ),
+                    contexts: self.query_indexed_strings(
+                        "?[idx, context] := *decision_context{workspace: $ws, decision_id: $id, idx, state: $st, context}",
+                        params_map(&[("ws", &ws), ("id", &decision_id), ("st", state)]),
+                    ),
+                    ownership: self.query_ownership(&ws, "", "architectural_decision", &decision_id, state),
+                }
+            })
+            .collect();
+
         Ok(Some(DomainModel {
             name: project_name,
             description,
             bounded_contexts,
+            external_systems,
+            architectural_decisions,
+            ownership: project_ownership,
             rules,
             tech_stack,
             conventions,
         }))
     }
+
+    // ── Graph-native Query & Mutation Helpers ─────────────────────────────
+
+    pub fn query_entity(&self, ws: &str, ctx: &str, name: &str) -> Option<Entity> {
+        let rows = self.db.run_script(
+            "?[description, aggregate_root] := *entity{workspace: $ws, context: $ctx, name: $name, state: 'desired', description, aggregate_root}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(Entity {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            aggregate_root: matches!(&row[1], cozo::DataValue::Bool(true)),
+            fields: self.query_fields(ws, ctx, "entity", name, "desired"),
+            methods: self.query_methods(ws, ctx, "entity", name, "desired"),
+            invariants: self.query_invariants(ws, ctx, name, "desired"),
+        })
+    }
+
+    pub fn query_service(&self, ws: &str, ctx: &str, name: &str) -> Option<Service> {
+        let rows = self.db.run_script(
+            "?[description, kind] := *service{workspace: $ws, context: $ctx, name: $name, state: 'desired', description, kind}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        let dep_rows = self.db.run_script(
+            "?[dep] := *service_dep{workspace: $ws, context: $ctx, service: $name, dep, state: 'desired'}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).map(|r| r.rows).unwrap_or_default();
+        Some(Service {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            kind: match dv_str(&row[1]).as_str() {
+                "application" => ServiceKind::Application,
+                "infrastructure" => ServiceKind::Infrastructure,
+                _ => ServiceKind::Domain,
+            },
+            methods: self.query_methods(ws, ctx, "service", name, "desired"),
+            dependencies: dep_rows.iter().map(|r| dv_str(&r[0])).collect(),
+        })
+    }
+
+    pub fn query_event(&self, ws: &str, ctx: &str, name: &str) -> Option<DomainEvent> {
+        let rows = self.db.run_script(
+            "?[description, source] := *event{workspace: $ws, context: $ctx, name: $name, state: 'desired', description, source}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(DomainEvent {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            fields: self.query_fields(ws, ctx, "event", name, "desired"),
+            source: dv_str(&row[1]),
+        })
+    }
+
+    pub fn query_value_object(&self, ws: &str, ctx: &str, name: &str) -> Option<ValueObject> {
+        let rows = self.db.run_script(
+            "?[description] := *value_object{workspace: $ws, context: $ctx, name: $name, state: 'desired', description}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(ValueObject {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            fields: self.query_fields(ws, ctx, "value_object", name, "desired"),
+            validation_rules: self.query_vo_rules(ws, ctx, name, "desired"),
+        })
+    }
+
+    pub fn query_repository(&self, ws: &str, ctx: &str, name: &str) -> Option<Repository> {
+        let rows = self.db.run_script(
+            "?[aggregate] := *repository{workspace: $ws, context: $ctx, name: $name, state: 'desired', aggregate}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(Repository {
+            name: name.to_string(),
+            aggregate: dv_str(&row[0]),
+            methods: self.query_methods(ws, ctx, "repository", name, "desired"),
+        })
+    }
+
+    pub fn query_aggregate(&self, ws: &str, ctx: &str, name: &str) -> Option<Aggregate> {
+        let rows = self.db.run_script(
+            "?[description, root_entity] := *aggregate{workspace: $ws, context: $ctx, name: $name, state: 'desired', description, root_entity}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        let members = self.db.run_script(
+            "?[member_kind, member] := *aggregate_member{workspace: $ws, context: $ctx, aggregate: $name, member_kind, member, state: 'desired'}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).map(|r| r.rows).unwrap_or_default();
+        Some(Aggregate {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            root_entity: dv_str(&row[1]),
+            entities: members.iter().filter(|r| dv_str(&r[0]) == "entity").map(|r| dv_str(&r[1])).collect(),
+            value_objects: members.iter().filter(|r| dv_str(&r[0]) == "value_object").map(|r| dv_str(&r[1])).collect(),
+            ownership: self.query_ownership(ws, ctx, "aggregate", name, "desired"),
+        })
+    }
+
+    pub fn query_policy(&self, ws: &str, ctx: &str, name: &str) -> Option<Policy> {
+        let rows = self.db.run_script(
+            "?[description, kind] := *policy{workspace: $ws, context: $ctx, name: $name, state: 'desired', description, kind}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        let links = self.db.run_script(
+            "?[idx, link_kind, link] := *policy_link{workspace: $ws, context: $ctx, policy: $name, idx, state: 'desired', link_kind, link}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).map(|r| r.rows).unwrap_or_default();
+        let mut indexed = links.iter().map(|r| (dv_i64(&r[0]), dv_str(&r[1]), dv_str(&r[2]))).collect::<Vec<_>>();
+        indexed.sort_by_key(|(idx, _, _)| *idx);
+        Some(Policy {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            kind: match dv_str(&row[1]).as_str() {
+                "process_manager" => PolicyKind::ProcessManager,
+                "integration" => PolicyKind::Integration,
+                _ => PolicyKind::Domain,
+            },
+            triggers: indexed.iter().filter(|(_, kind, _)| kind == "trigger").map(|(_, _, link)| link.clone()).collect(),
+            commands: indexed.iter().filter(|(_, kind, _)| kind == "command").map(|(_, _, link)| link.clone()).collect(),
+            ownership: self.query_ownership(ws, ctx, "policy", name, "desired"),
+        })
+    }
+
+    pub fn query_read_model(&self, ws: &str, ctx: &str, name: &str) -> Option<ReadModel> {
+        let rows = self.db.run_script(
+            "?[description, source] := *read_model{workspace: $ws, context: $ctx, name: $name, state: 'desired', description, source}",
+            params_map(&[("ws", ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(ReadModel {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            source: dv_str(&row[1]),
+            fields: self.query_fields(ws, ctx, "read_model", name, "desired"),
+            ownership: self.query_ownership(ws, ctx, "read_model", name, "desired"),
+        })
+    }
+
+    pub fn query_external_system(&self, ws: &str, name: &str) -> Option<ExternalSystem> {
+        let rows = self.db.run_script(
+            "?[description, kind, rationale] := *external_system{workspace: $ws, name: $name, state: 'desired', description, kind, rationale}",
+            params_map(&[("ws", ws), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(ExternalSystem {
+            name: name.to_string(),
+            description: dv_str(&row[0]),
+            kind: dv_str(&row[1]),
+            consumed_by_contexts: self.query_indexed_strings(
+                "?[idx, context] := *external_system_context{workspace: $ws, system: $name, idx, state: 'desired', context}",
+                params_map(&[("ws", ws), ("name", name)]),
+            ),
+            rationale: dv_str(&row[2]),
+            ownership: self.query_ownership(ws, "", "external_system", name, "desired"),
+        })
+    }
+
+    pub fn query_architectural_decision(&self, ws: &str, id: &str) -> Option<ArchitecturalDecision> {
+        let rows = self.db.run_script(
+            "?[title, status, scope, date, rationale] := *architectural_decision{workspace: $ws, id: $id, state: 'desired', title, status, scope, date, rationale}",
+            params_map(&[("ws", ws), ("id", id)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(ArchitecturalDecision {
+            id: id.to_string(),
+            title: dv_str(&row[0]),
+            status: match dv_str(&row[1]).as_str() {
+                "accepted" => DecisionStatus::Accepted,
+                "superseded" => DecisionStatus::Superseded,
+                "deprecated" => DecisionStatus::Deprecated,
+                _ => DecisionStatus::Proposed,
+            },
+            scope: dv_str(&row[2]),
+            date: dv_str(&row[3]),
+            rationale: dv_str(&row[4]),
+            consequences: self.query_indexed_strings(
+                "?[idx, text] := *decision_consequence{workspace: $ws, decision_id: $id, idx, state: 'desired', text}",
+                params_map(&[("ws", ws), ("id", id)]),
+            ),
+            contexts: self.query_indexed_strings(
+                "?[idx, context] := *decision_context{workspace: $ws, decision_id: $id, idx, state: 'desired', context}",
+                params_map(&[("ws", ws), ("id", id)]),
+            ),
+            ownership: self.query_ownership(ws, "", "architectural_decision", id, "desired"),
+        })
+    }
+
+    pub fn upsert_context(&self, workspace_path: &str, name: &str, description: &str, module_path: &str, dependencies: &[String], ownership: &Ownership) -> Result<()> {
+        let ws = canonicalize_path(workspace_path);
+        self.db.run_script(
+            "?[workspace, name, state, description, module_path] <- [[$ws, $name, 'desired', $desc, $mp]] :put context { workspace, name, state => description, module_path }",
+            params_map(&[("ws", &ws), ("name", name), ("desc", description), ("mp", module_path)]),
+            ScriptMutability::Mutable,
+        ).map_err(|e| anyhow::anyhow!("upsert_context: {:?}", e))?;
+        let _ = self.db.run_script(
+            "?[workspace, from_ctx, to_ctx, state] := *context_dep{workspace, from_ctx, to_ctx, state}, workspace = $ws, from_ctx = $name, state = 'desired' :rm context_dep { workspace, from_ctx, to_ctx, state }",
+            params_map(&[("ws", &ws), ("name", name)]),
+            ScriptMutability::Mutable,
+        );
+        for dep in dependencies {
+            self.db.run_script(
+                "?[workspace, from_ctx, to_ctx, state] <- [[$ws, $from, $to, 'desired']] :put context_dep { workspace, from_ctx, to_ctx, state }",
+                params_map(&[("ws", &ws), ("from", name), ("to", dep)]),
+                ScriptMutability::Mutable,
+            ).map_err(|e| anyhow::anyhow!("upsert_context dep: {:?}", e))?;
+        }
+        self.save_owner_meta(&ws, name, "context", name, ownership, "desired")?;
+        Ok(())
+    }
+
+    pub fn upsert_aggregate(&self, workspace_path: &str, ctx: &str, aggregate: &Aggregate) -> Result<()> {
+        let ws = canonicalize_path(workspace_path);
+        self.db.run_script(
+            "?[workspace, context, name, state, description, root_entity] <- [[$ws, $ctx, $name, 'desired', $desc, $root]] :put aggregate { workspace, context, name, state => description, root_entity }",
+            params_map(&[("ws", &ws), ("ctx", ctx), ("name", &aggregate.name), ("desc", &aggregate.description), ("root", &aggregate.root_entity)]),
+            ScriptMutability::Mutable,
+        ).map_err(|e| anyhow::anyhow!("upsert_aggregate: {:?}", e))?;
+        self.save_owner_meta(&ws, ctx, "aggregate", &aggregate.name, &aggregate.ownership, "desired")?;
+        let _ = self.db.run_script(
+            "?[workspace, context, aggregate, member_kind, member, state] := *aggregate_member{workspace, context, aggregate, member_kind, member, state}, workspace = $ws, context = $ctx, aggregate = $name, state = 'desired' :rm aggregate_member { workspace, context, aggregate, member_kind, member, state }",
+            params_map(&[("ws", &ws), ("ctx", ctx), ("name", &aggregate.name)]),
+            ScriptMutability::Mutable,
+        );
+        for entity in &aggregate.entities { self.db.run_script("?[workspace, context, aggregate, member_kind, member, state] <- [[$ws, $ctx, $name, 'entity', $member, 'desired']] :put aggregate_member { workspace, context, aggregate, member_kind, member, state }", params_map(&[("ws", &ws), ("ctx", ctx), ("name", &aggregate.name), ("member", entity)]), ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_aggregate entity: {:?}", e))?; }
+        for vo in &aggregate.value_objects { self.db.run_script("?[workspace, context, aggregate, member_kind, member, state] <- [[$ws, $ctx, $name, 'value_object', $member, 'desired']] :put aggregate_member { workspace, context, aggregate, member_kind, member, state }", params_map(&[("ws", &ws), ("ctx", ctx), ("name", &aggregate.name), ("member", vo)]), ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_aggregate vo: {:?}", e))?; }
+        Ok(())
+    }
+
+    pub fn remove_aggregate(&self, workspace_path: &str, ctx: &str, name: &str) -> Result<bool> { let ws = canonicalize_path(workspace_path); let p = params_map(&[("ws", &ws), ("ctx", ctx), ("name", name)]); let exists = self.db.run_script("?[n] := *aggregate{workspace: $ws, context: $ctx, name: $name, state: 'desired'}, n = $name", p.clone(), ScriptMutability::Immutable).map(|r| !r.rows.is_empty()).unwrap_or(false); if !exists { return Ok(false); } let _ = self.db.run_script("?[workspace, context, aggregate, member_kind, member, state] := *aggregate_member{workspace, context, aggregate, member_kind, member, state}, workspace = $ws, context = $ctx, aggregate = $name, state = 'desired' :rm aggregate_member { workspace, context, aggregate, member_kind, member, state }", p.clone(), ScriptMutability::Mutable); self.remove_owner_meta(&ws, ctx, "aggregate", name); self.db.run_script("?[workspace, context, name, state] <- [[$ws, $ctx, $name, 'desired']] :rm aggregate { workspace, context, name, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("remove_aggregate: {:?}", e))?; Ok(true) }
+
+    pub fn upsert_policy(&self, workspace_path: &str, ctx: &str, policy: &Policy) -> Result<()> { let ws = canonicalize_path(workspace_path); let kind = format!("{:?}", policy.kind).to_lowercase(); self.db.run_script("?[workspace, context, name, state, description, kind] <- [[$ws, $ctx, $name, 'desired', $desc, $kind]] :put policy { workspace, context, name, state => description, kind }", params_map(&[("ws", &ws), ("ctx", ctx), ("name", &policy.name), ("desc", &policy.description), ("kind", &kind)]), ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_policy: {:?}", e))?; self.save_owner_meta(&ws, ctx, "policy", &policy.name, &policy.ownership, "desired")?; let _ = self.db.run_script("?[workspace, context, policy, link_kind, link, idx, state] := *policy_link{workspace, context, policy, link_kind, link, idx, state}, workspace = $ws, context = $ctx, policy = $name, state = 'desired' :rm policy_link { workspace, context, policy, link_kind, link, idx, state }", params_map(&[("ws", &ws), ("ctx", ctx), ("name", &policy.name)]), ScriptMutability::Mutable); for (idx, trigger) in policy.triggers.iter().enumerate() { let mut p = params_map(&[("ws", &ws), ("ctx", ctx), ("name", &policy.name), ("link", trigger)]); p.insert("idx".into(), int_dv(idx as i64)); self.db.run_script("?[workspace, context, policy, link_kind, link, idx, state] <- [[$ws, $ctx, $name, 'trigger', $link, $idx, 'desired']] :put policy_link { workspace, context, policy, link_kind, link, idx, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_policy trigger: {:?}", e))?; } for (idx, command) in policy.commands.iter().enumerate() { let mut p = params_map(&[("ws", &ws), ("ctx", ctx), ("name", &policy.name), ("link", command)]); p.insert("idx".into(), int_dv(idx as i64)); self.db.run_script("?[workspace, context, policy, link_kind, link, idx, state] <- [[$ws, $ctx, $name, 'command', $link, $idx, 'desired']] :put policy_link { workspace, context, policy, link_kind, link, idx, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_policy command: {:?}", e))?; } Ok(()) }
+
+    pub fn remove_policy(&self, workspace_path: &str, ctx: &str, name: &str) -> Result<bool> { let ws = canonicalize_path(workspace_path); let p = params_map(&[("ws", &ws), ("ctx", ctx), ("name", name)]); let exists = self.db.run_script("?[n] := *policy{workspace: $ws, context: $ctx, name: $name, state: 'desired'}, n = $name", p.clone(), ScriptMutability::Immutable).map(|r| !r.rows.is_empty()).unwrap_or(false); if !exists { return Ok(false); } let _ = self.db.run_script("?[workspace, context, policy, link_kind, link, idx, state] := *policy_link{workspace, context, policy, link_kind, link, idx, state}, workspace = $ws, context = $ctx, policy = $name, state = 'desired' :rm policy_link { workspace, context, policy, link_kind, link, idx, state }", p.clone(), ScriptMutability::Mutable); self.remove_owner_meta(&ws, ctx, "policy", name); self.db.run_script("?[workspace, context, name, state] <- [[$ws, $ctx, $name, 'desired']] :rm policy { workspace, context, name, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("remove_policy: {:?}", e))?; Ok(true) }
+
+    pub fn upsert_read_model(&self, workspace_path: &str, ctx: &str, read_model: &ReadModel) -> Result<()> { let ws = canonicalize_path(workspace_path); self.db.run_script("?[workspace, context, name, state, description, source] <- [[$ws, $ctx, $name, 'desired', $desc, $src]] :put read_model { workspace, context, name, state => description, source }", params_map(&[("ws", &ws), ("ctx", ctx), ("name", &read_model.name), ("desc", &read_model.description), ("src", &read_model.source)]), ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_read_model: {:?}", e))?; self.save_owner_meta(&ws, ctx, "read_model", &read_model.name, &read_model.ownership, "desired")?; self.replace_owner_fields(&ws, ctx, "read_model", &read_model.name, &read_model.fields)?; Ok(()) }
+
+    pub fn remove_read_model(&self, workspace_path: &str, ctx: &str, name: &str) -> Result<bool> { let ws = canonicalize_path(workspace_path); let p = params_map(&[("ws", &ws), ("ctx", ctx), ("name", name)]); let exists = self.db.run_script("?[n] := *read_model{workspace: $ws, context: $ctx, name: $name, state: 'desired'}, n = $name", p.clone(), ScriptMutability::Immutable).map(|r| !r.rows.is_empty()).unwrap_or(false); if !exists { return Ok(false); } self.remove_owner_meta(&ws, ctx, "read_model", name); let _ = self.db.run_script("?[workspace, context, owner_kind, owner, name, state] := *field{workspace, context, owner_kind, owner, name, state}, workspace = $ws, context = $ctx, owner_kind = 'read_model', owner = $name, state = 'desired' :rm field { workspace, context, owner_kind, owner, name, state }", p.clone(), ScriptMutability::Mutable); self.db.run_script("?[workspace, context, name, state] <- [[$ws, $ctx, $name, 'desired']] :rm read_model { workspace, context, name, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("remove_read_model: {:?}", e))?; Ok(true) }
+
+    pub fn upsert_external_system(&self, workspace_path: &str, system: &ExternalSystem) -> Result<()> { let ws = canonicalize_path(workspace_path); self.db.run_script("?[workspace, name, state, description, kind, rationale] <- [[$ws, $name, 'desired', $desc, $kind, $rationale]] :put external_system { workspace, name, state => description, kind, rationale }", params_map(&[("ws", &ws), ("name", &system.name), ("desc", &system.description), ("kind", &system.kind), ("rationale", &system.rationale)]), ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_external_system: {:?}", e))?; self.save_owner_meta(&ws, "", "external_system", &system.name, &system.ownership, "desired")?; let _ = self.db.run_script("?[workspace, system, context, idx, state] := *external_system_context{workspace, system, context, idx, state}, workspace = $ws, system = $name, state = 'desired' :rm external_system_context { workspace, system, context, idx, state }", params_map(&[("ws", &ws), ("name", &system.name)]), ScriptMutability::Mutable); for (idx, ctx) in system.consumed_by_contexts.iter().enumerate() { let mut p = params_map(&[("ws", &ws), ("name", &system.name), ("ctx", ctx)]); p.insert("idx".into(), int_dv(idx as i64)); self.db.run_script("?[workspace, system, context, idx, state] <- [[$ws, $name, $ctx, $idx, 'desired']] :put external_system_context { workspace, system, context, idx, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_external_system ctx: {:?}", e))?; } Ok(()) }
+
+    pub fn remove_external_system(&self, workspace_path: &str, name: &str) -> Result<bool> { let ws = canonicalize_path(workspace_path); let p = params_map(&[("ws", &ws), ("name", name)]); let exists = self.db.run_script("?[n] := *external_system{workspace: $ws, name: $name, state: 'desired'}, n = $name", p.clone(), ScriptMutability::Immutable).map(|r| !r.rows.is_empty()).unwrap_or(false); if !exists { return Ok(false); } self.remove_owner_meta(&ws, "", "external_system", name); let _ = self.db.run_script("?[workspace, system, context, idx, state] := *external_system_context{workspace, system, context, idx, state}, workspace = $ws, system = $name, state = 'desired' :rm external_system_context { workspace, system, context, idx, state }", p.clone(), ScriptMutability::Mutable); self.db.run_script("?[workspace, name, state] <- [[$ws, $name, 'desired']] :rm external_system { workspace, name, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("remove_external_system: {:?}", e))?; Ok(true) }
+
+    pub fn upsert_architectural_decision(&self, workspace_path: &str, decision: &ArchitecturalDecision) -> Result<()> { let ws = canonicalize_path(workspace_path); let status = format!("{:?}", decision.status).to_lowercase(); self.db.run_script("?[workspace, id, state, title, status, scope, date, rationale] <- [[$ws, $id, 'desired', $title, $status, $scope, $date, $rationale]] :put architectural_decision { workspace, id, state => title, status, scope, date, rationale }", params_map(&[("ws", &ws), ("id", &decision.id), ("title", &decision.title), ("status", &status), ("scope", &decision.scope), ("date", &decision.date), ("rationale", &decision.rationale)]), ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_architectural_decision: {:?}", e))?; self.save_owner_meta(&ws, "", "architectural_decision", &decision.id, &decision.ownership, "desired")?; let _ = self.db.run_script("?[workspace, decision_id, context, idx, state] := *decision_context{workspace, decision_id, context, idx, state}, workspace = $ws, decision_id = $id, state = 'desired' :rm decision_context { workspace, decision_id, context, idx, state }", params_map(&[("ws", &ws), ("id", &decision.id)]), ScriptMutability::Mutable); let _ = self.db.run_script("?[workspace, decision_id, idx, state] := *decision_consequence{workspace, decision_id, idx, state}, workspace = $ws, decision_id = $id, state = 'desired' :rm decision_consequence { workspace, decision_id, idx, state }", params_map(&[("ws", &ws), ("id", &decision.id)]), ScriptMutability::Mutable); for (idx, ctx) in decision.contexts.iter().enumerate() { let mut p = params_map(&[("ws", &ws), ("id", &decision.id), ("ctx", ctx)]); p.insert("idx".into(), int_dv(idx as i64)); self.db.run_script("?[workspace, decision_id, context, idx, state] <- [[$ws, $id, $ctx, $idx, 'desired']] :put decision_context { workspace, decision_id, context, idx, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_architectural_decision ctx: {:?}", e))?; } for (idx, consequence) in decision.consequences.iter().enumerate() { let mut p = params_map(&[("ws", &ws), ("id", &decision.id), ("text", consequence)]); p.insert("idx".into(), int_dv(idx as i64)); self.db.run_script("?[workspace, decision_id, idx, state, text] <- [[$ws, $id, $idx, 'desired', $text]] :put decision_consequence { workspace, decision_id, idx, state => text }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("upsert_architectural_decision consequence: {:?}", e))?; } Ok(()) }
+
+    pub fn remove_architectural_decision(&self, workspace_path: &str, id: &str) -> Result<bool> { let ws = canonicalize_path(workspace_path); let p = params_map(&[("ws", &ws), ("id", id)]); let exists = self.db.run_script("?[n] := *architectural_decision{workspace: $ws, id: $id, state: 'desired'}, n = $id", p.clone(), ScriptMutability::Immutable).map(|r| !r.rows.is_empty()).unwrap_or(false); if !exists { return Ok(false); } self.remove_owner_meta(&ws, "", "architectural_decision", id); let _ = self.db.run_script("?[workspace, decision_id, context, idx, state] := *decision_context{workspace, decision_id, context, idx, state}, workspace = $ws, decision_id = $id, state = 'desired' :rm decision_context { workspace, decision_id, context, idx, state }", p.clone(), ScriptMutability::Mutable); let _ = self.db.run_script("?[workspace, decision_id, idx, state] := *decision_consequence{workspace, decision_id, idx, state}, workspace = $ws, decision_id = $id, state = 'desired' :rm decision_consequence { workspace, decision_id, idx, state }", p.clone(), ScriptMutability::Mutable); self.db.run_script("?[workspace, id, state] <- [[$ws, $id, 'desired']] :rm architectural_decision { workspace, id, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("remove_architectural_decision: {:?}", e))?; Ok(true) }
 
     // ── Project Operations ─────────────────────────────────────────────────
 
@@ -1095,126 +1690,6 @@ impl Store {
         let json = serde_json::to_string_pretty(&model)?;
         std::fs::write(file_path, json)
             .with_context(|| format!("Failed to write file: {file_path}"))?;
-        Ok(())
-    }
-
-    // ── Graph-Native Atomic Operations ─────────────────────────────────────
-
-    /// Upsert a bounded context directly (state='desired').
-    #[allow(dead_code)]
-    pub fn put_desired_context(
-        &self,
-        workspace_path: &str,
-        ctx_name: &str,
-        desc: &str,
-        module_path: &str,
-    ) -> Result<()> {
-        let ws = canonicalize_path(workspace_path);
-        let params = params_map(&[
-            ("ws", &ws),
-            ("name", ctx_name),
-            ("desc", desc),
-            ("mp", module_path),
-        ]);
-        self.db
-            .run_script(
-                "?[workspace, name, state, description, module_path] <- \
-                    [[$ws, $name, 'desired', $desc, $mp]] \
-                 :put context { workspace, name, state => description, module_path }",
-                params,
-                ScriptMutability::Mutable,
-            )
-            .map_err(|e| anyhow::anyhow!("put_desired_context: {:?}", e))?;
-        Ok(())
-    }
-
-    /// Upsert an entity directly (state='desired').
-    #[allow(dead_code)]
-    pub fn put_desired_entity(
-        &self,
-        workspace_path: &str,
-        ctx: &str,
-        name: &str,
-        desc: &str,
-        is_agg: bool,
-    ) -> Result<()> {
-        let ws = canonicalize_path(workspace_path);
-        let mut params = params_map(&[
-            ("ws", &ws),
-            ("ctx", ctx),
-            ("name", name),
-            ("desc", desc),
-        ]);
-        params.insert("agg".into(), cozo::DataValue::Bool(is_agg));
-        self.db
-            .run_script(
-                "?[workspace, context, name, state, description, aggregate_root] <- \
-                    [[$ws, $ctx, $name, 'desired', $desc, $agg]] \
-                 :put entity { workspace, context, name, state => description, aggregate_root }",
-                params,
-                ScriptMutability::Mutable,
-            )
-            .map_err(|e| anyhow::anyhow!("put_desired_entity: {:?}", e))?;
-        Ok(())
-    }
-
-    /// Upsert a service directly (state='desired').
-    #[allow(dead_code)]
-    pub fn put_desired_service(
-        &self,
-        workspace_path: &str,
-        ctx: &str,
-        name: &str,
-        desc: &str,
-        kind: &str,
-    ) -> Result<()> {
-        let ws = canonicalize_path(workspace_path);
-        let params = params_map(&[
-            ("ws", &ws),
-            ("ctx", ctx),
-            ("name", name),
-            ("desc", desc),
-            ("kind", kind),
-        ]);
-        self.db
-            .run_script(
-                "?[workspace, context, name, state, description, kind] <- \
-                    [[$ws, $ctx, $name, 'desired', $desc, $kind]] \
-                 :put service { workspace, context, name, state => description, kind }",
-                params,
-                ScriptMutability::Mutable,
-            )
-            .map_err(|e| anyhow::anyhow!("put_desired_service: {:?}", e))?;
-        Ok(())
-    }
-
-    /// Upsert an event directly (state='desired').
-    #[allow(dead_code)]
-    pub fn put_desired_event(
-        &self,
-        workspace_path: &str,
-        ctx: &str,
-        name: &str,
-        desc: &str,
-        source: &str,
-    ) -> Result<()> {
-        let ws = canonicalize_path(workspace_path);
-        let params = params_map(&[
-            ("ws", &ws),
-            ("ctx", ctx),
-            ("name", name),
-            ("desc", desc),
-            ("src", source),
-        ]);
-        self.db
-            .run_script(
-                "?[workspace, context, name, state, description, source] <- \
-                    [[$ws, $ctx, $name, 'desired', $desc, $src]] \
-                 :put event { workspace, context, name, state => description, source }",
-                params,
-                ScriptMutability::Mutable,
-            )
-            .map_err(|e| anyhow::anyhow!("put_desired_event: {:?}", e))?;
         Ok(())
     }
 
@@ -1358,7 +1833,6 @@ impl Store {
     // ── Datalog Query Runners ─────────────────────────────────────────────
 
     /// Run an arbitrary Datalog query with `$ws` parameter.
-    #[allow(dead_code)]
     pub fn run_datalog(&self, script: &str, workspace: &str) -> Result<Vec<Vec<String>>> {
         let params = params_map(&[("ws", workspace)]);
         let result = self
@@ -1831,6 +2305,9 @@ mod tests {
             name: name.into(),
             description: "Test project".into(),
             bounded_contexts: vec![],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
@@ -1846,6 +2323,10 @@ mod tests {
                     name: "Identity".into(),
                     description: "Auth context".into(),
                     module_path: "src/identity".into(),
+                    ownership: Ownership::default(),
+                    aggregates: vec![],
+                    policies: vec![],
+                    read_models: vec![],
                     entities: vec![Entity {
                         name: "User".into(),
                         description: "A user".into(),
@@ -1875,6 +2356,10 @@ mod tests {
                     name: "Billing".into(),
                     description: "Billing context".into(),
                     module_path: "src/billing".into(),
+                    ownership: Ownership::default(),
+                    aggregates: vec![],
+                    policies: vec![],
+                    read_models: vec![],
                     entities: vec![Entity {
                         name: "Subscription".into(),
                         description: "A subscription".into(),
@@ -1890,6 +2375,9 @@ mod tests {
                     dependencies: vec!["Identity".into()],
                 },
             ],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
             rules: vec![ArchitecturalRule {
                 id: "LAYER-001".into(),
                 description: "Domain must not depend on infra".into(),
@@ -1910,6 +2398,10 @@ mod tests {
                 name: "Catalog".into(),
                 description: "Product catalog".into(),
                 module_path: "src/catalog".into(),
+                ownership: Ownership::default(),
+                aggregates: vec![],
+                policies: vec![],
+                read_models: vec![],
                 entities: vec![Entity {
                     name: "Product".into(),
                     description: "A product".into(),
@@ -2054,6 +2546,9 @@ mod tests {
                 }],
                 dependencies: vec![],
             }],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
@@ -2373,6 +2868,10 @@ mod tests {
             name: "NewCtx".into(),
             description: "".into(),
             module_path: "".into(),
+            ownership: Ownership::default(),
+            aggregates: vec![],
+            policies: vec![],
+            read_models: vec![],
             entities: vec![],
             value_objects: vec![],
             services: vec![],

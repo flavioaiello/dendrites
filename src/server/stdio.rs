@@ -222,3 +222,148 @@ async fn send(stdout: &mut io::Stdout, resp: &JsonRpcResponse) -> Result<()> {
     stdout.flush().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::protocol::JsonRpcRequest;
+    use serde_json::{json, Value};
+
+    fn test_store() -> std::sync::Arc<Store> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "dendrites_stdio_test_{}_{}.db",
+            std::process::id(),
+            id
+        ));
+        std::sync::Arc::new(Store::open(&path).unwrap())
+    }
+
+    fn make_request(method: &str, params: Option<Value>) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id: Some(json!(1)),
+            method: method.into(),
+            params,
+        }
+    }
+
+    #[test]
+    fn test_initialize_echoes_client_version() {
+        let store = test_store();
+        let req = make_request(
+            "initialize",
+            Some(json!({"protocolVersion": "2024-11-05"})),
+        );
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert!(result["serverInfo"]["name"].as_str().unwrap().contains("dendrites"));
+        assert!(result["capabilities"]["tools"].is_object());
+        assert!(result["capabilities"]["resources"].is_object());
+        assert!(result["capabilities"]["prompts"].is_object());
+    }
+
+    #[test]
+    fn test_initialize_falls_back_to_baseline_version() {
+        let store = test_store();
+        let req = make_request("initialize", Some(json!({})));
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+    }
+
+    #[test]
+    fn test_ping_returns_empty_object() {
+        let store = test_store();
+        let req = make_request("ping", None);
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap(), json!({}));
+    }
+
+    #[test]
+    fn test_unknown_method_returns_error() {
+        let store = test_store();
+        let req = make_request("nonexistent/method", None);
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, -32601);
+    }
+
+    #[test]
+    fn test_tools_list_returns_all_tools() {
+        let store = test_store();
+        let req = make_request("tools/list", None);
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        let result = resp.result.unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"get_model"));
+        assert!(names.contains(&"model_health"));
+        assert!(names.contains(&"scrutinize"));
+        assert!(names.contains(&"set_model"));
+        assert!(names.contains(&"refactor"));
+    }
+
+    #[test]
+    fn test_prompts_list_returns_guidelines() {
+        let store = test_store();
+        let req = make_request("prompts/list", None);
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        let result = resp.result.unwrap();
+        let prompts = result["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0]["name"], "dendrites_guidelines");
+    }
+
+    #[test]
+    fn test_resources_list_returns_entries() {
+        let store = test_store();
+        let req = make_request("resources/list", None);
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        let result = resp.result.unwrap();
+        assert!(result["resources"].is_array());
+    }
+
+    #[test]
+    fn test_tools_call_missing_params_returns_error() {
+        let store = test_store();
+        let req = make_request("tools/call", None);
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, -32602);
+    }
+
+    #[test]
+    fn test_tools_call_model_health() {
+        let store = test_store();
+        let req = make_request(
+            "tools/call",
+            Some(json!({"name": "model_health", "arguments": {}})),
+        );
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        let content = result["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+        let health: Value = serde_json::from_str(text).unwrap();
+        assert!(health["score"].is_number());
+    }
+
+    #[test]
+    fn test_prompts_get_nonexistent_returns_error() {
+        let store = test_store();
+        let req = make_request(
+            "prompts/get",
+            Some(json!({"name": "nonexistent_prompt"})),
+        );
+        let resp = handle_request("/tmp/test-stdio", &store, &req);
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().code, -32602);
+    }
+}

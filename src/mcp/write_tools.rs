@@ -25,7 +25,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "kind": {
                         "type": "string",
-                        "enum": ["bounded_context", "entity", "service", "event", "value_object", "repository"],
+                        "enum": ["bounded_context", "aggregate", "entity", "policy", "read_model", "service", "event", "value_object", "repository", "external_system", "architectural_decision"],
                         "description": "Type of model element to create/update/remove"
                     },
                     "action": {
@@ -41,6 +41,30 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                         "type": "array", "items": { "type": "string" },
                         "description": "Dependencies (bounded_context: allowed context deps; service: service deps)"
                     },
+                    "ownership": {
+                        "type": "object",
+                        "properties": {
+                            "team": { "type": "string" },
+                            "owners": { "type": "array", "items": { "type": "string" } },
+                            "rationale": { "type": "string" }
+                        },
+                        "description": "Ownership/team metadata"
+                    },
+                    "root_entity": { "type": "string", "description": "Aggregate root entity name" },
+                    "entities": { "type": "array", "items": { "type": "string" }, "description": "Aggregate entity members" },
+                    "value_objects": { "type": "array", "items": { "type": "string" }, "description": "Aggregate value object members" },
+                    "policy_kind": { "type": "string", "enum": ["domain", "process_manager", "integration"], "description": "Policy classification" },
+                    "triggers": { "type": "array", "items": { "type": "string" }, "description": "Policy trigger events" },
+                    "commands": { "type": "array", "items": { "type": "string" }, "description": "Policy emitted commands" },
+                    "consumed_by_contexts": { "type": "array", "items": { "type": "string" }, "description": "Contexts integrating with an external system" },
+                    "kind_label": { "type": "string", "description": "Free-form kind label for external systems" },
+                    "rationale": { "type": "string", "description": "Architectural rationale or boundary rationale" },
+                    "title": { "type": "string", "description": "Architectural decision title" },
+                    "status": { "type": "string", "enum": ["proposed", "accepted", "superseded", "deprecated"], "description": "Decision lifecycle status" },
+                    "scope": { "type": "string", "description": "Decision scope" },
+                    "date": { "type": "string", "description": "Decision date" },
+                    "contexts": { "type": "array", "items": { "type": "string" }, "description": "Related bounded contexts" },
+                    "consequences": { "type": "array", "items": { "type": "string" }, "description": "Decision consequences" },
                     "aggregate_root": { "type": "boolean", "description": "Entity only" },
                     "fields": {
                         "type": "array",
@@ -54,7 +78,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                             },
                             "required": ["name", "type"]
                         },
-                        "description": "Fields (entity, event, value_object)"
+                        "description": "Fields (entity, event, value_object, read_model)"
                     },
                     "methods": {
                         "type": "array",
@@ -193,6 +217,16 @@ fn dispatch_write_tool(
                     upsert_repository(model, args)
                 },
                 ("repository", "remove") => remove_repository(model, args),
+                    ("aggregate", "upsert") => upsert_aggregate(model, args),
+                    ("aggregate", "remove") => remove_aggregate(model, args),
+                    ("policy", "upsert") => upsert_policy(model, args),
+                    ("policy", "remove") => remove_policy(model, args),
+                    ("read_model", "upsert") => upsert_read_model(model, args),
+                    ("read_model", "remove") => remove_read_model(model, args),
+                    ("external_system", "upsert") => upsert_external_system(model, args),
+                    ("external_system", "remove") => remove_external_system(model, args),
+                    ("architectural_decision", "upsert") => upsert_architectural_decision(model, args),
+                    ("architectural_decision", "remove") => remove_architectural_decision(model, args),
                 ("", _) => error_result("'kind' is required"),
                 (_, action) => error_result(format!("Unknown action '{action}' for kind '{kind}'")),
             }
@@ -219,8 +253,9 @@ fn dispatch_write_tool(
                                     .to_string(),
                                 )
                             } else {
-                                // Raw Datalog diff returned
-                                text_result(serde_json::to_string_pretty(&diff_data).unwrap())
+                                // Enrich diff with module paths, file suggestions, and priorities
+                                let enriched = enrich_plan(store, workspace_path, changes);
+                                text_result(serde_json::to_string_pretty(&enriched).unwrap())
                             }
                         }
                         Err(e) => error_result(format!("Diff generation failed: {e}")),
@@ -329,6 +364,9 @@ fn upsert_bounded_context(model: &mut DomainModel, args: &Value) -> ToolCallResu
             if let Some(mp) = args.get("module_path").and_then(|v| v.as_str()) {
                 bc.module_path = mp.to_string();
             }
+            if args.get("ownership").is_some() {
+                bc.ownership = parse_ownership(args.get("ownership"));
+            }
             if let Some(deps) = args.get("dependencies").and_then(|v| v.as_array()) {
                 bc.dependencies = deps
                     .iter()
@@ -342,6 +380,10 @@ fn upsert_bounded_context(model: &mut DomainModel, args: &Value) -> ToolCallResu
                 name: ctx_name.clone(),
                 description: arg_str(args, "description"),
                 module_path: arg_str(args, "module_path"),
+                ownership: parse_ownership(args.get("ownership")),
+                aggregates: vec![],
+                policies: vec![],
+                read_models: vec![],
                 entities: vec![],
                 value_objects: vec![],
                 services: vec![],
@@ -798,6 +840,365 @@ fn remove_repository(model: &mut DomainModel, args: &Value) -> ToolCallResult {
     }
 }
 
+fn upsert_aggregate(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let aggregate_name = arg_str(args, "name");
+
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+
+    let entities = parse_string_array(args.get("entities"));
+    let value_objects = parse_string_array(args.get("value_objects"));
+    let ownership = parse_ownership(args.get("ownership"));
+
+    match bc
+        .aggregates
+        .iter_mut()
+        .find(|a| a.name.eq_ignore_ascii_case(&aggregate_name))
+    {
+        Some(aggregate) => {
+            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
+                aggregate.description = description.to_string();
+            }
+            if let Some(root_entity) = args.get("root_entity").and_then(|v| v.as_str()) {
+                aggregate.root_entity = root_entity.to_string();
+            }
+            if args.get("entities").is_some() {
+                aggregate.entities = entities;
+            }
+            if args.get("value_objects").is_some() {
+                aggregate.value_objects = value_objects;
+            }
+            if args.get("ownership").is_some() {
+                aggregate.ownership = ownership;
+            }
+            text_result(json!({
+                "message": format!("Updated aggregate '{}' in '{}'", aggregate_name, ctx_name)
+            }).to_string())
+        }
+        None => {
+            bc.aggregates.push(Aggregate {
+                name: aggregate_name.clone(),
+                description: arg_str(args, "description"),
+                root_entity: arg_str(args, "root_entity"),
+                entities,
+                value_objects,
+                ownership,
+            });
+            text_result(json!({
+                "message": format!("Created aggregate '{}' in '{}'", aggregate_name, ctx_name)
+            }).to_string())
+        }
+    }
+}
+
+fn remove_aggregate(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let aggregate_name = arg_str(args, "name");
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+    let before = bc.aggregates.len();
+    bc.aggregates
+        .retain(|a| !a.name.eq_ignore_ascii_case(&aggregate_name));
+    if bc.aggregates.len() < before {
+        text_result(format!("Removed aggregate '{aggregate_name}' from '{ctx_name}'"))
+    } else {
+        error_result(format!("Aggregate '{aggregate_name}' not found in '{ctx_name}'"))
+    }
+}
+
+fn upsert_policy(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let policy_name = arg_str(args, "name");
+
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+
+    let triggers = parse_string_array(args.get("triggers"));
+    let commands = parse_string_array(args.get("commands"));
+    let ownership = parse_ownership(args.get("ownership"));
+
+    match bc
+        .policies
+        .iter_mut()
+        .find(|p| p.name.eq_ignore_ascii_case(&policy_name))
+    {
+        Some(policy) => {
+            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
+                policy.description = description.to_string();
+            }
+            if let Some(kind) = args.get("policy_kind").and_then(|v| v.as_str()) {
+                policy.kind = parse_policy_kind(kind);
+            }
+            if args.get("triggers").is_some() {
+                policy.triggers = triggers;
+            }
+            if args.get("commands").is_some() {
+                policy.commands = commands;
+            }
+            if args.get("ownership").is_some() {
+                policy.ownership = ownership;
+            }
+            text_result(json!({
+                "message": format!("Updated policy '{}' in '{}'", policy_name, ctx_name)
+            }).to_string())
+        }
+        None => {
+            bc.policies.push(Policy {
+                name: policy_name.clone(),
+                description: arg_str(args, "description"),
+                kind: parse_policy_kind(&arg_str(args, "policy_kind")),
+                triggers,
+                commands,
+                ownership,
+            });
+            text_result(json!({
+                "message": format!("Created policy '{}' in '{}'", policy_name, ctx_name)
+            }).to_string())
+        }
+    }
+}
+
+fn remove_policy(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let policy_name = arg_str(args, "name");
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+    let before = bc.policies.len();
+    bc.policies
+        .retain(|p| !p.name.eq_ignore_ascii_case(&policy_name));
+    if bc.policies.len() < before {
+        text_result(format!("Removed policy '{policy_name}' from '{ctx_name}'"))
+    } else {
+        error_result(format!("Policy '{policy_name}' not found in '{ctx_name}'"))
+    }
+}
+
+fn upsert_read_model(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let read_model_name = arg_str(args, "name");
+
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+
+    let ownership = parse_ownership(args.get("ownership"));
+    match bc
+        .read_models
+        .iter_mut()
+        .find(|rm| rm.name.eq_ignore_ascii_case(&read_model_name))
+    {
+        Some(read_model) => {
+            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
+                read_model.description = description.to_string();
+            }
+            if let Some(source) = args.get("source").and_then(|v| v.as_str()) {
+                read_model.source = source.to_string();
+            }
+            if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) {
+                merge_fields(&mut read_model.fields, fields);
+            }
+            if args.get("ownership").is_some() {
+                read_model.ownership = ownership;
+            }
+            text_result(json!({
+                "message": format!("Updated read model '{}' in '{}'", read_model_name, ctx_name)
+            }).to_string())
+        }
+        None => {
+            bc.read_models.push(ReadModel {
+                name: read_model_name.clone(),
+                description: arg_str(args, "description"),
+                source: arg_str(args, "source"),
+                fields: parse_fields(args.get("fields")),
+                ownership,
+            });
+            text_result(json!({
+                "message": format!("Created read model '{}' in '{}'", read_model_name, ctx_name)
+            }).to_string())
+        }
+    }
+}
+
+fn remove_read_model(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let read_model_name = arg_str(args, "name");
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+    let before = bc.read_models.len();
+    bc.read_models
+        .retain(|rm| !rm.name.eq_ignore_ascii_case(&read_model_name));
+    if bc.read_models.len() < before {
+        text_result(format!("Removed read model '{read_model_name}' from '{ctx_name}'"))
+    } else {
+        error_result(format!("Read model '{read_model_name}' not found in '{ctx_name}'"))
+    }
+}
+
+fn upsert_external_system(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let system_name = arg_str(args, "name");
+    let ownership = parse_ownership(args.get("ownership"));
+    let consumed_by_contexts = parse_string_array(args.get("consumed_by_contexts"));
+
+    match model
+        .external_systems
+        .iter_mut()
+        .find(|s| s.name.eq_ignore_ascii_case(&system_name))
+    {
+        Some(system) => {
+            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
+                system.description = description.to_string();
+            }
+            if let Some(kind) = args.get("kind_label").and_then(|v| v.as_str()) {
+                system.kind = kind.to_string();
+            }
+            if let Some(rationale) = args.get("rationale").and_then(|v| v.as_str()) {
+                system.rationale = rationale.to_string();
+            }
+            if args.get("consumed_by_contexts").is_some() {
+                system.consumed_by_contexts = consumed_by_contexts;
+            }
+            if args.get("ownership").is_some() {
+                system.ownership = ownership;
+            }
+            text_result(json!({
+                "message": format!("Updated external system '{}'", system_name)
+            }).to_string())
+        }
+        None => {
+            model.external_systems.push(ExternalSystem {
+                name: system_name.clone(),
+                description: arg_str(args, "description"),
+                kind: arg_str(args, "kind_label"),
+                consumed_by_contexts,
+                rationale: arg_str(args, "rationale"),
+                ownership,
+            });
+            text_result(json!({
+                "message": format!("Created external system '{}'", system_name)
+            }).to_string())
+        }
+    }
+}
+
+fn remove_external_system(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let system_name = arg_str(args, "name");
+    let before = model.external_systems.len();
+    model.external_systems
+        .retain(|s| !s.name.eq_ignore_ascii_case(&system_name));
+    if model.external_systems.len() < before {
+        text_result(format!("Removed external system '{system_name}'"))
+    } else {
+        error_result(format!("External system '{system_name}' not found"))
+    }
+}
+
+fn upsert_architectural_decision(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let decision_id = arg_str(args, "name");
+    let ownership = parse_ownership(args.get("ownership"));
+    let contexts = parse_string_array(args.get("contexts"));
+    let consequences = parse_string_array(args.get("consequences"));
+
+    match model
+        .architectural_decisions
+        .iter_mut()
+        .find(|d| d.id.eq_ignore_ascii_case(&decision_id))
+    {
+        Some(decision) => {
+            if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
+                decision.title = title.to_string();
+            }
+            if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
+                decision.status = parse_decision_status(status);
+            }
+            if let Some(scope) = args.get("scope").and_then(|v| v.as_str()) {
+                decision.scope = scope.to_string();
+            }
+            if let Some(date) = args.get("date").and_then(|v| v.as_str()) {
+                decision.date = date.to_string();
+            }
+            if let Some(rationale) = args.get("rationale").and_then(|v| v.as_str()) {
+                decision.rationale = rationale.to_string();
+            }
+            if args.get("contexts").is_some() {
+                decision.contexts = contexts;
+            }
+            if args.get("consequences").is_some() {
+                decision.consequences = consequences;
+            }
+            if args.get("ownership").is_some() {
+                decision.ownership = ownership;
+            }
+            text_result(json!({
+                "message": format!("Updated architectural decision '{}'", decision_id)
+            }).to_string())
+        }
+        None => {
+            model.architectural_decisions.push(ArchitecturalDecision {
+                id: decision_id.clone(),
+                title: arg_str(args, "title"),
+                status: parse_decision_status(&arg_str(args, "status")),
+                scope: arg_str(args, "scope"),
+                date: arg_str(args, "date"),
+                rationale: arg_str(args, "rationale"),
+                consequences,
+                contexts,
+                ownership,
+            });
+            text_result(json!({
+                "message": format!("Created architectural decision '{}'", decision_id)
+            }).to_string())
+        }
+    }
+}
+
+fn remove_architectural_decision(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let decision_id = arg_str(args, "name");
+    let before = model.architectural_decisions.len();
+    model.architectural_decisions
+        .retain(|d| !d.id.eq_ignore_ascii_case(&decision_id));
+    if model.architectural_decisions.len() < before {
+        text_result(format!("Removed architectural decision '{decision_id}'"))
+    } else {
+        error_result(format!("Architectural decision '{decision_id}' not found"))
+    }
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 fn text_result(text: impl Into<String>) -> ToolCallResult {
@@ -819,6 +1220,44 @@ fn arg_str(args: &Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn parse_ownership(val: Option<&Value>) -> Ownership {
+    let Some(obj) = val else {
+        return Ownership::default();
+    };
+    Ownership {
+        team: obj.get("team").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        owners: obj
+            .get("owners")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        rationale: obj.get("rationale").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    }
+}
+
+fn parse_string_array(val: Option<&Value>) -> Vec<String> {
+    val.and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+fn parse_policy_kind(kind: &str) -> PolicyKind {
+    match kind {
+        "process_manager" => PolicyKind::ProcessManager,
+        "integration" => PolicyKind::Integration,
+        _ => PolicyKind::Domain,
+    }
+}
+
+fn parse_decision_status(status: &str) -> DecisionStatus {
+    match status {
+        "accepted" => DecisionStatus::Accepted,
+        "superseded" => DecisionStatus::Superseded,
+        "deprecated" => DecisionStatus::Deprecated,
+        _ => DecisionStatus::Proposed,
+    }
 }
 
 /// Compute the suggested file path for a domain artifact, using project conventions.
@@ -930,6 +1369,116 @@ fn merge_methods(existing: &mut Vec<Method>, new_methods: &[Value]) {
     }
 }
 
+// ── Refactor Plan Enrichment ──────────────────────────────────────────────
+
+/// Priority ordering for change kinds. Lower = do first.
+fn kind_priority(kind: &str) -> u8 {
+    match kind {
+        "context" => 0,
+        "entity" => 1,
+        "service" => 2,
+        "repository" => 3,
+        "value_object" => 4,
+        "event" => 5,
+        "invariant" | "field" | "method" => 6,
+        _ => 7,
+    }
+}
+
+/// Suggest a file path for a pending change based on context module_path and kind.
+fn suggest_file(module_path: &str, kind: &str, name: &str) -> String {
+    if module_path.is_empty() {
+        return String::new();
+    }
+    let snake = to_snake(name);
+    match kind {
+        "context" => format!("{}/mod.rs", module_path),
+        "entity" | "value_object" => format!("{}/model.rs", module_path),
+        "service" => format!("{}/{}.rs", module_path, snake),
+        "repository" => format!("{}/{}.rs", module_path, snake),
+        "event" => format!("{}/events.rs", module_path),
+        "field" | "method" | "invariant" => {
+            // These belong to their owner; owner_kind determines the file
+            format!("{}/mod.rs", module_path)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Enrich raw Datalog diff with suggested files, priorities, rationale, and health score.
+fn enrich_plan(store: &Store, workspace_path: &str, changes: &[Value]) -> Value {
+    // Build context → module_path lookup from desired state
+    let module_paths: std::collections::HashMap<String, String> = store
+        .run_datalog(
+            "?[name, module_path] := *context{workspace: $ws, name, module_path, state: 'desired'}",
+            workspace_path,
+        )
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| (row[0].clone(), row[1].clone()))
+        .collect();
+
+    // Enrich each change
+    let mut enriched: Vec<Value> = changes
+        .iter()
+        .map(|change| {
+            let kind = change["kind"].as_str().unwrap_or("");
+            let action = change["action"].as_str().unwrap_or("");
+            let name = change["name"].as_str().unwrap_or("");
+            let ctx = change.get("context").and_then(|v| v.as_str()).unwrap_or("");
+
+            let mp = if kind == "context" {
+                module_paths.get(name).cloned().unwrap_or_default()
+            } else {
+                module_paths.get(ctx).cloned().unwrap_or_default()
+            };
+
+            let suggested_file = suggest_file(&mp, kind, name);
+            let priority = kind_priority(kind);
+
+            let rationale = match (action, kind) {
+                ("add", "context") => format!("Create bounded context '{name}' module structure"),
+                ("remove", "context") => format!("Remove bounded context '{name}' and its module"),
+                ("add", "entity") => format!("Add entity '{name}' to context '{ctx}'"),
+                ("remove", "entity") => format!("Remove entity '{name}' from context '{ctx}'"),
+                ("add", "service") => format!("Implement service '{name}' in context '{ctx}'"),
+                ("remove", "service") => format!("Remove service '{name}' from context '{ctx}'"),
+                ("add", k) => format!("Add {k} '{name}' in context '{ctx}'"),
+                ("remove", k) => format!("Remove {k} '{name}' from context '{ctx}'"),
+                _ => String::new(),
+            };
+
+            let mut entry = change.clone();
+            entry["priority"] = json!(priority);
+            entry["suggested_file"] = json!(suggested_file);
+            entry["rationale"] = json!(rationale);
+            entry
+        })
+        .collect();
+
+    // Sort by priority (structural changes first)
+    enriched.sort_by_key(|e| e["priority"].as_u64().unwrap_or(99));
+
+    // Include model health score
+    let health_score = store
+        .model_health(workspace_path)
+        .map(|h| h.score)
+        .unwrap_or(0);
+
+    json!({
+        "status": "pending_changes",
+        "pending_changes": enriched,
+        "change_count": enriched.len(),
+        "health_score": health_score,
+        "migration_notes": [
+            "Apply changes in priority order (0 = highest).",
+            "Context-level changes should be done before entity/service changes.",
+            "Run `refactor scan` after implementing to update the actual model.",
+            "Run `refactor accept` when implementation matches the desired model."
+        ]
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,6 +1501,10 @@ mod tests {
                 name: "Identity".into(),
                 description: "Auth context".into(),
                 module_path: "src/identity".into(),
+                ownership: Ownership::default(),
+                aggregates: vec![],
+                policies: vec![],
+                read_models: vec![],
                 entities: vec![Entity {
                     name: "User".into(),
                     description: "A user".into(),
@@ -971,6 +1524,9 @@ mod tests {
                 events: vec![],
                 dependencies: vec![],
             }],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),

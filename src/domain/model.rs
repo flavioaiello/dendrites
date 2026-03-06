@@ -16,6 +16,15 @@ pub struct DomainModel {
     /// Bounded contexts (DDD)
     #[serde(default)]
     pub bounded_contexts: Vec<BoundedContext>,
+    /// External systems that define integration boundaries for the project
+    #[serde(default)]
+    pub external_systems: Vec<ExternalSystem>,
+    /// Architecture decision records and their rationale
+    #[serde(default)]
+    pub architectural_decisions: Vec<ArchitecturalDecision>,
+    /// Project ownership and stewardship metadata
+    #[serde(default)]
+    pub ownership: Ownership,
     /// Cross-cutting architectural rules
     #[serde(default)]
     pub rules: Vec<ArchitecturalRule>,
@@ -38,6 +47,9 @@ impl DomainModel {
             name,
             description: String::new(),
             bounded_contexts: vec![],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
@@ -63,6 +75,30 @@ impl DomainModel {
             if bc.name.is_empty() {
                 anyhow::bail!("Bounded context must have a name");
             }
+            for aggregate in &bc.aggregates {
+                if aggregate.name.is_empty() {
+                    anyhow::bail!(
+                        "Aggregate in bounded context '{}' must have a name",
+                        bc.name
+                    );
+                }
+            }
+            for policy in &bc.policies {
+                if policy.name.is_empty() {
+                    anyhow::bail!(
+                        "Policy in bounded context '{}' must have a name",
+                        bc.name
+                    );
+                }
+            }
+            for read_model in &bc.read_models {
+                if read_model.name.is_empty() {
+                    anyhow::bail!(
+                        "Read model in bounded context '{}' must have a name",
+                        bc.name
+                    );
+                }
+            }
             for entity in &bc.entities {
                 if entity.name.is_empty() {
                     anyhow::bail!(
@@ -70,6 +106,16 @@ impl DomainModel {
                         bc.name
                     );
                 }
+            }
+        }
+        for system in &self.external_systems {
+            if system.name.is_empty() {
+                anyhow::bail!("External system must have a name");
+            }
+        }
+        for decision in &self.architectural_decisions {
+            if decision.id.is_empty() {
+                anyhow::bail!("Architectural decision must have an id");
             }
         }
         Ok(())
@@ -87,6 +133,14 @@ pub struct BoundedContext {
     #[serde(default)]
     pub module_path: String,
     #[serde(default)]
+    pub ownership: Ownership,
+    #[serde(default)]
+    pub aggregates: Vec<Aggregate>,
+    #[serde(default)]
+    pub policies: Vec<Policy>,
+    #[serde(default)]
+    pub read_models: Vec<ReadModel>,
+    #[serde(default)]
     pub entities: Vec<Entity>,
     #[serde(default)]
     pub value_objects: Vec<ValueObject>,
@@ -99,6 +153,64 @@ pub struct BoundedContext {
     /// Allowed dependencies to other bounded contexts
     #[serde(default)]
     pub dependencies: Vec<String>,
+}
+
+// ─── Explicit Aggregates ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Aggregate {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub root_entity: String,
+    #[serde(default)]
+    pub entities: Vec<String>,
+    #[serde(default)]
+    pub value_objects: Vec<String>,
+    #[serde(default)]
+    pub ownership: Ownership,
+}
+
+// ─── Policies / Process Managers ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Policy {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub kind: PolicyKind,
+    #[serde(default)]
+    pub triggers: Vec<String>,
+    #[serde(default)]
+    pub commands: Vec<String>,
+    #[serde(default)]
+    pub ownership: Ownership,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyKind {
+    #[default]
+    Domain,
+    ProcessManager,
+    Integration,
+}
+
+// ─── Read Models ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadModel {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub fields: Vec<Field>,
+    #[serde(default)]
+    pub ownership: Ownership,
 }
 
 // ─── Entity ────────────────────────────────────────────────────────────────
@@ -179,6 +291,68 @@ pub struct DomainEvent {
     /// Which entity/aggregate emits this event
     #[serde(default)]
     pub source: String,
+}
+
+// ─── External Boundaries ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalSystem {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub consumed_by_contexts: Vec<String>,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default)]
+    pub ownership: Ownership,
+}
+
+// ─── Architectural Decisions ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchitecturalDecision {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub status: DecisionStatus,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub date: String,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default)]
+    pub consequences: Vec<String>,
+    #[serde(default)]
+    pub contexts: Vec<String>,
+    #[serde(default)]
+    pub ownership: Ownership,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionStatus {
+    #[default]
+    Proposed,
+    Accepted,
+    Superseded,
+    Deprecated,
+}
+
+// ─── Ownership ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Ownership {
+    #[serde(default)]
+    pub team: String,
+    #[serde(default)]
+    pub owners: Vec<String>,
+    #[serde(default)]
+    pub rationale: String,
 }
 
 // ─── Shared Building Blocks ────────────────────────────────────────────────

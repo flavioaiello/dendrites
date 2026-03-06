@@ -1,242 +1,565 @@
 {
-  "name": "MyProject",
-  "description": "Example domain model for a SaaS platform with user management and billing",
-
-  "tech_stack": {
-    "language": "Rust",
-    "framework": "Axum",
-    "database": "PostgreSQL",
-    "messaging": "NATS",
-    "additional": ["Redis", "OpenTelemetry"]
-  },
-
+  "name": "dendrites",
+  "description": "",
   "bounded_contexts": [
     {
-      "name": "Identity",
-      "description": "User identity, authentication, and authorization",
-      "module_path": "src/identity",
+      "name": "Domain",
+      "description": "Core domain model types, analysis, and snake_case utilities",
+      "module_path": "src/domain",
       "entities": [
         {
-          "name": "User",
-          "description": "Registered user account",
+          "name": "BoundedContext",
+          "description": "A bounded context containing entities, services, events, value objects, repositories",
+          "aggregate_root": false,
+          "fields": [
+            {
+              "name": "name",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "description",
+              "type": "String",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "module_path",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "entities",
+              "type": "Vec<Entity>",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "value_objects",
+              "type": "Vec<ValueObject>",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "services",
+              "type": "Vec<Service>",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "repositories",
+              "type": "Vec<Repository>",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "events",
+              "type": "Vec<DomainEvent>",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "dependencies",
+              "type": "Vec<String>",
+              "required": false,
+              "description": ""
+            }
+          ],
+          "methods": [],
+          "invariants": []
+        },
+        {
+          "name": "DomainModel",
+          "description": "Root aggregate for the domain model — contains contexts, rules, conventions",
           "aggregate_root": true,
           "fields": [
-            { "name": "id", "type": "UserId", "required": true, "description": "Unique user identifier" },
-            { "name": "email", "type": "Email", "required": true, "description": "User email address" },
-            { "name": "display_name", "type": "String", "required": true, "description": "Display name" },
-            { "name": "status", "type": "UserStatus", "required": true, "description": "Account status (active, suspended, deleted)" },
-            { "name": "created_at", "type": "DateTime<Utc>", "required": true, "description": "Account creation timestamp" }
+            {
+              "name": "name",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "description",
+              "type": "String",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "bounded_contexts",
+              "type": "Vec<BoundedContext>",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "rules",
+              "type": "Vec<ArchRule>",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "tech_stack",
+              "type": "TechStack",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "conventions",
+              "type": "Conventions",
+              "required": false,
+              "description": ""
+            }
           ],
-          "methods": [
-            { "name": "register", "description": "Create a new user account", "parameters": [
-              { "name": "email", "type": "Email", "required": true },
-              { "name": "display_name", "type": "String", "required": true }
-            ], "return_type": "Result<User, RegistrationError>" },
-            { "name": "suspend", "description": "Suspend the user account", "parameters": [
-              { "name": "reason", "type": "String", "required": true }
-            ], "return_type": "Result<(), DomainError>" }
-          ],
+          "methods": [],
           "invariants": [
-            "Email must be unique across all users",
-            "A deleted user cannot be reactivated",
-            "Display name must be between 2 and 100 characters"
+            "name must not be empty",
+            "bounded context names must be unique within a model"
           ]
         }
       ],
       "value_objects": [
         {
-          "name": "Email",
-          "description": "Validated email address",
+          "name": "Field",
+          "description": "A typed field on an entity, event, or value object",
           "fields": [
-            { "name": "value", "type": "String", "required": true }
+            {
+              "name": "name",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "field_type",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "required",
+              "type": "bool",
+              "required": true,
+              "description": ""
+            }
           ],
-          "validation_rules": ["Must be a valid email format", "Must be lowercase"]
-        },
-        {
-          "name": "UserId",
-          "description": "Type-safe user identifier",
-          "fields": [
-            { "name": "0", "type": "Uuid", "required": true }
-          ],
-          "validation_rules": ["Must be a valid UUIDv7"]
-        }
-      ],
-      "services": [
-        {
-          "name": "AuthenticationService",
-          "description": "Handles user authentication flows",
-          "kind": "application",
-          "methods": [
-            { "name": "authenticate", "description": "Verify credentials and issue token", "parameters": [
-              { "name": "email", "type": "Email" },
-              { "name": "password", "type": "String" }
-            ], "return_type": "Result<AuthToken, AuthError>" }
-          ],
-          "dependencies": ["UserRepository", "TokenService"]
-        }
-      ],
-      "repositories": [
-        {
-          "name": "UserRepository",
-          "aggregate": "User",
-          "methods": [
-            { "name": "find_by_id", "parameters": [{ "name": "id", "type": "UserId" }], "return_type": "Result<Option<User>>" },
-            { "name": "find_by_email", "parameters": [{ "name": "email", "type": "Email" }], "return_type": "Result<Option<User>>" },
-            { "name": "save", "parameters": [{ "name": "user", "type": "User" }], "return_type": "Result<()>" }
-          ]
-        }
-      ],
-      "events": [
-        {
-          "name": "UserRegistered",
-          "description": "Emitted when a new user registers",
-          "source": "User",
-          "fields": [
-            { "name": "user_id", "type": "UserId", "required": true },
-            { "name": "email", "type": "Email", "required": true },
-            { "name": "registered_at", "type": "DateTime<Utc>", "required": true }
+          "validation_rules": [
+            "name must not be empty",
+            "field_type must not be empty"
           ]
         },
         {
-          "name": "UserSuspended",
-          "description": "Emitted when a user account is suspended",
-          "source": "User",
+          "name": "Method",
+          "description": "A method on an entity, service, or repository",
           "fields": [
-            { "name": "user_id", "type": "UserId", "required": true },
-            { "name": "reason", "type": "String", "required": true }
+            {
+              "name": "name",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "return_type",
+              "type": "String",
+              "required": false,
+              "description": ""
+            },
+            {
+              "name": "description",
+              "type": "String",
+              "required": false,
+              "description": ""
+            }
+          ],
+          "validation_rules": [
+            "name must not be empty"
           ]
         }
       ],
+      "services": [],
+      "repositories": [],
+      "events": [],
       "dependencies": []
     },
     {
-      "name": "Billing",
-      "description": "Subscription management, invoicing, and payments",
-      "module_path": "src/billing",
-      "entities": [
+      "name": "MCP",
+      "description": "Model Context Protocol server — tools, write_tools, resources, prompts",
+      "module_path": "src/mcp",
+      "entities": [],
+      "value_objects": [
         {
-          "name": "Subscription",
-          "description": "User subscription to a plan",
-          "aggregate_root": true,
+          "name": "ToolDefinition",
+          "description": "MCP protocol types — JSON-RPC request/response, tool/resource/prompt definitions",
           "fields": [
-            { "name": "id", "type": "SubscriptionId", "required": true },
-            { "name": "user_id", "type": "UserId", "required": true },
-            { "name": "plan", "type": "Plan", "required": true },
-            { "name": "status", "type": "SubscriptionStatus", "required": true },
-            { "name": "current_period_end", "type": "DateTime<Utc>", "required": true }
+            {
+              "name": "name",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "description",
+              "type": "String",
+              "required": true,
+              "description": ""
+            },
+            {
+              "name": "input_schema",
+              "type": "Value",
+              "required": true,
+              "description": ""
+            }
           ],
-          "methods": [
-            { "name": "subscribe", "parameters": [
-              { "name": "user_id", "type": "UserId" },
-              { "name": "plan", "type": "Plan" }
-            ], "return_type": "Result<Subscription>" },
-            { "name": "cancel", "parameters": [], "return_type": "Result<()>" },
-            { "name": "renew", "parameters": [], "return_type": "Result<()>" }
-          ],
-          "invariants": [
-            "A user can only have one active subscription at a time",
-            "Cancelled subscriptions remain active until period end"
-          ]
-        },
-        {
-          "name": "Invoice",
-          "description": "Billing invoice for a subscription period",
-          "aggregate_root": false,
-          "fields": [
-            { "name": "id", "type": "InvoiceId", "required": true },
-            { "name": "subscription_id", "type": "SubscriptionId", "required": true },
-            { "name": "amount", "type": "Money", "required": true },
-            { "name": "status", "type": "InvoiceStatus", "required": true }
-          ]
+          "validation_rules": []
         }
       ],
       "services": [
         {
-          "name": "PaymentService",
-          "description": "Processes payments through external payment provider",
-          "kind": "infrastructure",
+          "name": "ResourceHandler",
+          "description": "Serves dendrites:// resources backed by Datalog — overview, rules, conventions, per-context",
+          "kind": "application",
           "methods": [
-            { "name": "charge", "parameters": [
-              { "name": "invoice", "type": "Invoice" }
-            ], "return_type": "Result<PaymentResult>" }
+            {
+              "name": "list_resources",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "store",
+                  "type": "&Store",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Vec<ResourceDefinition>"
+            },
+            {
+              "name": "read_resource",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "store",
+                  "type": "&Store",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "uri",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "ResourceReadResult"
+            }
           ],
-          "dependencies": ["StripeClient"]
+          "dependencies": []
+        },
+        {
+          "name": "ToolHandler",
+          "description": "Handles read-only tool calls (get_model, review) backed by Datalog queries",
+          "kind": "application",
+          "methods": [
+            {
+              "name": "call_tool",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "store",
+                  "type": "&Store",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "name",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "args",
+                  "type": "&Value",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "ToolCallResult"
+            },
+            {
+              "name": "build_model_overview",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "store",
+                  "type": "&Store",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "state",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Value"
+            }
+          ],
+          "dependencies": []
+        },
+        {
+          "name": "WriteToolHandler",
+          "description": "Handles write tool calls (set_model, refactor) — mutates desired model, auto-saves",
+          "kind": "application",
+          "methods": [
+            {
+              "name": "call_write_tool",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "store",
+                  "type": "&Store",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "name",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "args",
+                  "type": "&Value",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "ToolCallResult"
+            }
+          ],
+          "dependencies": []
         }
       ],
-      "events": [
+      "repositories": [],
+      "events": [],
+      "dependencies": [
+        "Domain",
+        "Store"
+      ]
+    },
+    {
+      "name": "Server",
+      "description": "Stdio transport layer — JSON-RPC routing, request dispatch",
+      "module_path": "src/server",
+      "entities": [],
+      "value_objects": [],
+      "services": [],
+      "repositories": [],
+      "events": [],
+      "dependencies": [
+        "MCP",
+        "Store"
+      ]
+    },
+    {
+      "name": "Store",
+      "description": "CozoDB-backed persistence layer with 15 Datalog relations for the domain knowledge graph",
+      "module_path": "src/store",
+      "entities": [
         {
-          "name": "SubscriptionCreated",
-          "description": "Emitted when a new subscription is created",
-          "source": "Subscription",
+          "name": "Store",
+          "description": "CozoDB database wrapper with Datalog query engine and 15 first-class relations",
+          "aggregate_root": true,
           "fields": [
-            { "name": "subscription_id", "type": "SubscriptionId", "required": true },
-            { "name": "user_id", "type": "UserId", "required": true },
-            { "name": "plan", "type": "Plan", "required": true }
+            {
+              "name": "db",
+              "type": "DbInstance",
+              "required": true,
+              "description": ""
+            }
+          ],
+          "methods": [
+            {
+              "name": "save_desired",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "model",
+                  "type": "&DomainModel",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Result<()>"
+            },
+            {
+              "name": "load_desired",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Result<Option<DomainModel>>"
+            },
+            {
+              "name": "run_datalog",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "script",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                },
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Result<Vec<Vec<String>>>"
+            },
+            {
+              "name": "diff_graph",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Result<Value>"
+            },
+            {
+              "name": "accept",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Result<()>"
+            },
+            {
+              "name": "reset",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "workspace",
+                  "type": "&str",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Result<()>"
+            }
+          ],
+          "invariants": [
+            "All relations must include a state column (desired|actual)",
+            "Workspace paths must be canonicalized before storage"
           ]
         }
       ],
-      "dependencies": ["Identity"]
+      "value_objects": [],
+      "services": [],
+      "repositories": [
+        {
+          "name": "StoreRepository",
+          "aggregate": "Store",
+          "methods": [
+            {
+              "name": "open",
+              "description": "",
+              "parameters": [
+                {
+                  "name": "path",
+                  "type": "&Path",
+                  "required": false,
+                  "description": ""
+                }
+              ],
+              "return_type": "Result<Store>"
+            },
+            {
+              "name": "open_default",
+              "description": "",
+              "parameters": [],
+              "return_type": "Result<Store>"
+            }
+          ]
+        }
+      ],
+      "events": [],
+      "dependencies": []
     }
   ],
-
-  "rules": [
-    {
-      "id": "LAYER-001",
-      "description": "Domain layer must not depend on infrastructure or application layers",
-      "severity": "error",
-      "scope": "domain"
-    },
-    {
-      "id": "LAYER-002",
-      "description": "Application services orchestrate domain objects but contain no business logic",
-      "severity": "error",
-      "scope": "application"
-    },
-    {
-      "id": "LAYER-003",
-      "description": "Infrastructure adapters implement repository traits defined in the domain layer",
-      "severity": "error",
-      "scope": "infrastructure"
-    },
-    {
-      "id": "DDD-001",
-      "description": "All state mutations on aggregates must go through aggregate root methods",
-      "severity": "error",
-      "scope": "domain"
-    },
-    {
-      "id": "DDD-002",
-      "description": "Cross-aggregate communication must use domain events, not direct references",
-      "severity": "warning",
-      "scope": "domain"
-    },
-    {
-      "id": "ERR-001",
-      "description": "Use typed domain errors (thiserror), never panic in business logic",
-      "severity": "error",
-      "scope": "all"
-    },
-    {
-      "id": "TEST-001",
-      "description": "Every aggregate root must have unit tests for all invariants",
-      "severity": "warning",
-      "scope": "testing"
-    }
-  ],
-
+  "rules": [],
+  "tech_stack": {
+    "language": "",
+    "framework": "",
+    "database": "",
+    "messaging": "",
+    "additional": []
+  },
   "conventions": {
     "naming": {
-      "entities": "PascalCase, singular noun (e.g. User, Subscription)",
-      "value_objects": "PascalCase, descriptive noun (e.g. Email, Money, UserId)",
-      "services": "PascalCase + 'Service' suffix (e.g. AuthenticationService)",
-      "repositories": "PascalCase + 'Repository' suffix (e.g. UserRepository)",
-      "events": "PascalCase, past-tense verb + noun (e.g. UserRegistered, SubscriptionCreated)"
+      "entities": "",
+      "value_objects": "",
+      "services": "",
+      "repositories": "",
+      "events": ""
     },
     "file_structure": {
-      "pattern": "src/{context}/{layer}/{type}.rs",
-      "layers": ["domain", "application", "infrastructure", "api"]
+      "pattern": "",
+      "layers": []
     },
-    "error_handling": "Use thiserror for domain errors, anyhow for application-level errors. All public functions return Result<T, E>.",
-    "testing": "Unit tests in same file (#[cfg(test)] mod tests). Integration tests in tests/ directory. Use testcontainers for database tests."
+    "error_handling": "",
+    "testing": ""
   }
 }

@@ -21,6 +21,20 @@ The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**, **
 * You MUST explore the codebase to identify root causes and ensure isomorphic, consistent validation across analogous pathways to prevent copy/paste drift.
 * You MUST defensively index failure modes: malformed JSON parsing, database transaction rollbacks, Datalog evaluation panics, partial graph reads/writes, connection timeouts, task cancellation, and memory/resource exhaustion.
 
+**GENERATIVE RULES (Writing & Modifying Code)**
+When generating or modifying code, you are the **last line of defense** before hostile input meets production:
+* **Anti-Vibe Protocol:** You **MUST NOT** ship incomplete or fragile security posture.
+* **No placeholders:** `TODO`, `FIXME`, `XXX`, `HACK`, `// ...`, “temporary”, “for now”, “in production we’ll…”.
+* **Exception:** Tracking notes MAY appear in non-executable documentation (e.g., docs/), never in runtime paths.
+* **No fake handling / pseudo-logic:** `if (true) return;`, unconditional success, `default: break`, “catch-and-ignore.”
+* **No deferred validation:** “validated upstream,” “trusted input,” “caller is responsible,” “checked elsewhere” are FORBIDDEN.
+* Validate at ingestion. Re-validate at trust boundaries. Trust nothing.
+* **No stub security functions:** Any `verify_* / validate_* / check_* / authenticate_* / authorize_*` MUST perform real checks with explicit failure paths.
+* **No unproven unwrap/panic paths:** `.unwrap()`, `.expect()`, unchecked indexing, `panic!()` outside tests are FORBIDDEN.
+* **Allowed only if “proof” exists and is documented:** proof = enforced by types + validated at boundary + negative tests that would fail if invariant breaks.
+* **No silent downgrades:** Code MUST NOT silently fall back to weaker protocols, ciphers, or unauthenticated states on error.
+* **Production-grade output (required)**: Emitted code SHALL be typed, auditable under hostile review, and backed by tests appropriate to risk.
+
 **AUDIT PHILOSOPHY (ZERO-TRUST COGNITION):** 
 Every line of code is guilty until proven mathematically and structurally innocent. Every incoming MCP command is a cognitive attack vector. Database queries MUST be structurally immune to injection and logically sound. Every state mutation is a risk to temporal consistency.
 

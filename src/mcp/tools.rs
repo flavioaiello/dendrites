@@ -20,6 +20,21 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "model_health".into(),
+            description: "Returns a structured health report for the domain model, computed \
+                          via Datalog inference from the CozoDB knowledge graph. Includes: \
+                          overall score (0-100), circular dependencies, layer violations, \
+                          missing invariants on aggregate roots, god contexts (>10 entities+services), \
+                          unsourced events, orphan contexts, and per-context complexity. \
+                          Use this to programmatically branch on model quality."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
             name: "scrutinize".into(),
             description: "Run Datalog-based analysis queries over the domain model knowledge graph. \
                           Supports predefined analyses (transitive_deps, circular_deps, \
@@ -120,6 +135,13 @@ pub fn call_tool(
             });
 
             text_result(serde_json::to_string(&overview).unwrap())
+        }
+
+        "model_health" => {
+            match store.model_health(workspace_path) {
+                Ok(health) => text_result(serde_json::to_string(&health).unwrap()),
+                Err(e) => error_result(format!("model_health query failed: {e}")),
+            }
         }
 
         "scrutinize" => {
@@ -586,6 +608,10 @@ mod tests {
                     name: "Identity".into(),
                     description: "Auth context".into(),
                     module_path: "src/identity".into(),
+                    ownership: Ownership::default(),
+                    aggregates: vec![],
+                    policies: vec![],
+                    read_models: vec![],
                     entities: vec![Entity {
                         name: "User".into(),
                         description: "A user".into(),
@@ -615,6 +641,10 @@ mod tests {
                     name: "Billing".into(),
                     description: "Billing context".into(),
                     module_path: "src/billing".into(),
+                    ownership: Ownership::default(),
+                    aggregates: vec![],
+                    policies: vec![],
+                    read_models: vec![],
                     entities: vec![],
                     value_objects: vec![],
                     services: vec![],
@@ -623,6 +653,9 @@ mod tests {
                     dependencies: vec!["Identity".into()],
                 },
             ],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
             rules: vec![ArchitecturalRule {
                 id: "LAYER-001".into(),
                 description: "Domain must not depend on infra".into(),
@@ -650,7 +683,7 @@ mod tests {
     #[test]
     fn test_list_tools_count() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 3);
     }
 
     #[test]
@@ -721,6 +754,10 @@ mod tests {
             name: "Notifications".into(),
             description: "".into(),
             module_path: "src/notifications".into(),
+            ownership: Ownership::default(),
+            aggregates: vec![],
+            policies: vec![],
+            read_models: vec![],
             entities: vec![],
             value_objects: vec![],
             services: vec![],

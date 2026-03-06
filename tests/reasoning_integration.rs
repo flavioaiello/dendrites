@@ -45,6 +45,10 @@ fn ecommerce_model() -> DomainModel {
                 name: "Catalog".into(),
                 description: "Product catalog management".into(),
                 module_path: "src/catalog".into(),
+                ownership: Ownership::default(),
+                aggregates: vec![],
+                policies: vec![],
+                read_models: vec![],
                 entities: vec![
                     Entity {
                         name: "Product".into(),
@@ -151,6 +155,10 @@ fn ecommerce_model() -> DomainModel {
                 name: "Ordering".into(),
                 description: "Order management".into(),
                 module_path: "src/ordering".into(),
+                ownership: Ownership::default(),
+                aggregates: vec![],
+                policies: vec![],
+                read_models: vec![],
                 entities: vec![
                     Entity {
                         name: "Order".into(),
@@ -232,6 +240,9 @@ fn ecommerce_model() -> DomainModel {
                 dependencies: vec!["Catalog".into()],
             },
         ],
+        external_systems: vec![],
+        architectural_decisions: vec![],
+        ownership: Ownership::default(),
         rules: vec![
             ArchitecturalRule { id: "LAYER-001".into(), description: "Domain must not depend on infra".into(), severity: Severity::Error, scope: "domain".into() },
         ],
@@ -738,6 +749,10 @@ fn perf_scale_10_contexts() {
             name: format!("Context{i}"),
             description: "".into(),
             module_path: format!("src/ctx{i}"),
+            ownership: Ownership::default(),
+            aggregates: vec![],
+            policies: vec![],
+            read_models: vec![],
             entities,
             value_objects: vec![],
             services: vec![],
@@ -751,6 +766,9 @@ fn perf_scale_10_contexts() {
         name: "ScaleTest".into(),
         description: "".into(),
         bounded_contexts: contexts,
+        external_systems: vec![],
+        architectural_decisions: vec![],
+        ownership: Ownership::default(),
         rules: vec![],
         tech_stack: TechStack::default(),
         conventions: Conventions::default(),

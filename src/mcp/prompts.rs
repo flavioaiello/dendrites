@@ -90,7 +90,7 @@ Dendrites maintains two models: the **actual** model (reflects implemented code)
 
 1. **Before writing code** → call `get_model` (shows actual + desired + pending changes)
 2. **To update the desired model** → call `set_model` with the appropriate `kind` (bounded_context, entity, service, event) — auto-saved, returns file path suggestions and dependency validation
-3. **To run Datalog analysis** → call `scrutinize` with analysis type (circular_deps, layer_violations, impact, aggregate_quality, dependency_graph, or custom Datalog)
+3. **To run Datalog analysis** → call `review` with analysis type (circular_deps, layer_violations, impact, aggregate_quality, dependency_graph, or custom Datalog)
 4. **To review changes** → call `refactor` to diff actual vs desired → code actions, file paths, priorities, migration notes
 5. **Iterate** steps 2–4 until the desired model is satisfactory
 6. **After implementing** → call `refactor` with `action: "accept"` to promote desired → actual
@@ -243,6 +243,10 @@ mod tests {
                 name: "Identity".into(),
                 description: "".into(),
                 module_path: "".into(),
+                ownership: Ownership::default(),
+                aggregates: vec![],
+                policies: vec![],
+                read_models: vec![],
                 entities: vec![],
                 value_objects: vec![],
                 services: vec![],
@@ -250,6 +254,9 @@ mod tests {
                 events: vec![],
                 dependencies: vec![],
             }],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
@@ -312,7 +319,7 @@ mod tests {
         let text = match &prompt.messages[0].content {
             ContentBlock::Text { text } => text,
         };
-        assert!(text.contains("`scrutinize`"));
+        assert!(text.contains("`review`"));
         assert!(text.contains("Datalog"));
     }
 

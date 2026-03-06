@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Build, Test & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  self-sync:
+    name: Domain Model Self-Sync Gate
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Import committed model
+        run: |
+          if [ -f dendrites.json ]; then
+            ./target/release/dendrites import dendrites.json -w "${{ github.workspace }}"
+          else
+            echo "No dendrites.json found — skipping import"
+          fi
+
+      - name: Scan actual model from AST
+        run: |
+          if [ -f dendrites.json ]; then
+            ./target/release/dendrites scan -w "${{ github.workspace }}"
+          fi
+
+      - name: Check for layer violations
+        run: |
+          if [ -f dendrites.json ]; then
+            ./target/release/dendrites check -w "${{ github.workspace }}"
+          fi
+
+      - name: Validate exported model matches committed
+        run: |
+          if [ -f dendrites.json ]; then
+            ./target/release/dendrites export /tmp/dendrites-ci.json -w "${{ github.workspace }}"
+            if ! diff -q dendrites.json /tmp/dendrites-ci.json > /dev/null 2>&1; then
+              echo "::warning::dendrites.json is stale — re-export after model changes"
+              diff dendrites.json /tmp/dendrites-ci.json || true
+            fi
+          fi
