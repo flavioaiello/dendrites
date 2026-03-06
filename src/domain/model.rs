@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 // ─── Top-Level Domain Model ────────────────────────────────────────────────
 
@@ -56,18 +55,7 @@ impl DomainModel {
         }
     }
 
-    /// Load from a JSON file (used by import).
-    pub fn load(path: &str) -> Result<Self> {
-        let path = Path::new(path);
-        let content = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read domain model from {}", path.display()))?;
-        let model: DomainModel = serde_json::from_str(&content)
-            .with_context(|| "Failed to parse domain model JSON")?;
-        model.validate()?;
-        Ok(model)
-    }
-
-    fn validate(&self) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         if self.name.is_empty() {
             anyhow::bail!("Domain model must have a name");
         }

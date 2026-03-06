@@ -36,9 +36,9 @@ class Dendrites < Formula
           }
         }
 
-      To import an existing dendrites.json:
+      To export the actual model:
 
-        dendrites import dendrites.json --workspace /path/to/your/project
+        dendrites export model.json --workspace /path/to/project --state actual
 
       To list all stored projects:
 

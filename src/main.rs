@@ -22,16 +22,6 @@ enum Commands {
         workspace: Option<String>,
     },
 
-    /// Import a dendrites.json file into the store for a workspace
-    Import {
-        /// Path to the JSON file to import
-        file: String,
-
-        /// Workspace path to associate with this model
-        #[arg(short, long)]
-        workspace: String,
-    },
-
     /// Export a workspace's domain model to a JSON file
     Export {
         /// Output file path
@@ -40,6 +30,10 @@ enum Commands {
         /// Workspace path whose model to export
         #[arg(short, long)]
         workspace: String,
+
+        /// State to export: desired, actual, or both (default: desired)
+        #[arg(short, long, default_value = "desired")]
+        state: String,
     },
 
     /// List all projects stored in the local database
@@ -124,21 +118,10 @@ async fn main() -> Result<()> {
             server::stdio::run(workspace, store).await?;
         }
 
-        Some(Commands::Import { file, workspace }) => {
+        Some(Commands::Export { file, workspace, state }) => {
             let store = store::Store::open_default()?;
-            let model = store.import_from_file(&workspace, &file)?;
-            eprintln!(
-                "Imported '{}' ({} contexts) into store for workspace: {}",
-                model.name,
-                model.bounded_contexts.len(),
-                workspace
-            );
-        }
-
-        Some(Commands::Export { file, workspace }) => {
-            let store = store::Store::open_default()?;
-            store.export_to_file(&workspace, &file)?;
-            eprintln!("Exported model for workspace '{}' to: {}", workspace, file);
+            store.export_to_file(&workspace, &file, &state)?;
+            eprintln!("Exported {} model for workspace '{}' to: {}", state, workspace, file);
         }
 
         Some(Commands::List) => {

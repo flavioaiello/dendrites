@@ -152,33 +152,17 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
     ]
 }
 
-/// List of tool names that mutate the model and should trigger auto-save.
-const MUTATION_TOOLS: &[&str] = &["set_model"];
-
-/// Dispatches a write tool call. Mutations are auto-saved to the store.
+/// Dispatches a write tool call.
 pub fn call_write_tool(
     workspace_path: &str,
     store: &Store,
     name: &str,
     args: &Value,
 ) -> ToolCallResult {
-    let mut model = store.load_desired(workspace_path).ok().flatten()
-        .unwrap_or_else(|| DomainModel::empty(workspace_path));
-
-    let result = dispatch_write_tool(&mut model, workspace_path, store, name, args);
-
-    // Auto-save after successful mutations
-    if result.is_error.is_none() && MUTATION_TOOLS.contains(&name)
-        && let Err(e) = store.save_desired(workspace_path, &model)
-    {
-        return error_result(format!("Mutation succeeded but save failed: {e}"));
-    }
-
-    result
+    dispatch_write_tool(workspace_path, store, name, args)
 }
 
 fn dispatch_write_tool(
-    model: &mut DomainModel,
     workspace_path: &str,
     store: &Store,
     name: &str,
@@ -193,40 +177,28 @@ fn dispatch_write_tool(
                 .unwrap_or("upsert");
 
             match (kind.as_str(), action) {
-                ("bounded_context", "upsert") => {
-                    upsert_bounded_context(model, args)
-                },
-                ("bounded_context", "remove") => remove_bounded_context(model, args),
-                ("entity", "upsert") => {
-                    upsert_entity(model, args)
-                },
-                ("entity", "remove") => remove_entity(model, args),
-                ("service", "upsert") => {
-                    upsert_service(model, args)
-                },
-                ("service", "remove") => remove_service(model, args),
-                ("event", "upsert") => {
-                    upsert_event(model, args)
-                },
-                ("event", "remove") => remove_event(model, args),
-                ("value_object", "upsert") => {
-                    upsert_value_object(model, args)
-                },
-                ("value_object", "remove") => remove_value_object(model, args),
-                ("repository", "upsert") => {
-                    upsert_repository(model, args)
-                },
-                ("repository", "remove") => remove_repository(model, args),
-                    ("aggregate", "upsert") => upsert_aggregate(model, args),
-                    ("aggregate", "remove") => remove_aggregate(model, args),
-                    ("policy", "upsert") => upsert_policy(model, args),
-                    ("policy", "remove") => remove_policy(model, args),
-                    ("read_model", "upsert") => upsert_read_model(model, args),
-                    ("read_model", "remove") => remove_read_model(model, args),
-                    ("external_system", "upsert") => upsert_external_system(model, args),
-                    ("external_system", "remove") => remove_external_system(model, args),
-                    ("architectural_decision", "upsert") => upsert_architectural_decision(model, args),
-                    ("architectural_decision", "remove") => remove_architectural_decision(model, args),
+                ("bounded_context", "upsert") => upsert_bounded_context(store, workspace_path, args),
+                ("bounded_context", "remove") => remove_bounded_context(store, workspace_path, args),
+                ("entity", "upsert") => upsert_entity(store, workspace_path, args),
+                ("entity", "remove") => remove_entity(store, workspace_path, args),
+                ("service", "upsert") => upsert_service(store, workspace_path, args),
+                ("service", "remove") => remove_service(store, workspace_path, args),
+                ("event", "upsert") => upsert_event(store, workspace_path, args),
+                ("event", "remove") => remove_event(store, workspace_path, args),
+                ("value_object", "upsert") => upsert_value_object(store, workspace_path, args),
+                ("value_object", "remove") => remove_value_object(store, workspace_path, args),
+                ("repository", "upsert") => upsert_repository(store, workspace_path, args),
+                ("repository", "remove") => remove_repository(store, workspace_path, args),
+                ("aggregate", "upsert") => upsert_aggregate(store, workspace_path, args),
+                ("aggregate", "remove") => remove_aggregate(store, workspace_path, args),
+                ("policy", "upsert") => upsert_policy(store, workspace_path, args),
+                ("policy", "remove") => remove_policy(store, workspace_path, args),
+                ("read_model", "upsert") => upsert_read_model(store, workspace_path, args),
+                ("read_model", "remove") => remove_read_model(store, workspace_path, args),
+                ("external_system", "upsert") => upsert_external_system(store, workspace_path, args),
+                ("external_system", "remove") => remove_external_system(store, workspace_path, args),
+                ("architectural_decision", "upsert") => upsert_architectural_decision(store, workspace_path, args),
+                ("architectural_decision", "remove") => remove_architectural_decision(store, workspace_path, args),
                 ("", _) => error_result("'kind' is required"),
                 (_, action) => error_result(format!("Unknown action '{action}' for kind '{kind}'")),
             }
@@ -345,68 +317,40 @@ fn dispatch_write_tool(
 
 // ─── Kind handlers ─────────────────────────────────────────────────────────
 
-fn upsert_bounded_context(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_bounded_context(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "name");
     if ctx_name.is_empty() {
         return error_result("'name' is required");
     }
-
-    let existing = model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name));
-
-    let action = match existing {
-        Some(bc) => {
-            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
-                bc.description = desc.to_string();
-            }
-            if let Some(mp) = args.get("module_path").and_then(|v| v.as_str()) {
-                bc.module_path = mp.to_string();
-            }
-            if args.get("ownership").is_some() {
-                bc.ownership = parse_ownership(args.get("ownership"));
-            }
-            if let Some(deps) = args.get("dependencies").and_then(|v| v.as_array()) {
-                bc.dependencies = deps
-                    .iter()
-                    .filter_map(|d| d.as_str().map(String::from))
-                    .collect();
-            }
-            "updated"
-        }
-        None => {
-            model.bounded_contexts.push(BoundedContext {
-                name: ctx_name.clone(),
-                description: arg_str(args, "description"),
-                module_path: arg_str(args, "module_path"),
-                ownership: parse_ownership(args.get("ownership")),
-                aggregates: vec![],
-                policies: vec![],
-                read_models: vec![],
-                entities: vec![],
-                value_objects: vec![],
-                services: vec![],
-                repositories: vec![],
-                events: vec![],
-                dependencies: args
-                    .get("dependencies")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|d| d.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            });
-            "created"
-        }
+    let existing = store.load_desired(workspace_path).ok().flatten();
+    let current = existing
+        .as_ref()
+        .and_then(|m| m.bounded_contexts.iter().find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name)));
+    let description = args.get("description").and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| current.map(|bc| bc.description.clone()))
+        .unwrap_or_default();
+    let module_path = args.get("module_path").and_then(|v| v.as_str())
+        .map(String::from)
+        .or_else(|| current.map(|bc| bc.module_path.clone()))
+        .unwrap_or_default();
+    let ownership = if args.get("ownership").is_some() {
+        parse_ownership(args.get("ownership"))
+    } else {
+        current.map(|bc| bc.ownership.clone()).unwrap_or_default()
     };
+    let dependencies = args.get("dependencies").map(|v| parse_string_array(Some(v)))
+        .or_else(|| current.map(|bc| bc.dependencies.clone()))
+        .unwrap_or_default();
+    if let Err(e) = store.upsert_context(workspace_path, &ctx_name, &description, &module_path, &dependencies, &ownership) {
+        return error_result(format!("Failed to upsert bounded context: {e}"));
+    }
+    let action = if current.is_some() { "updated" } else { "created" };
 
-    // Inline dependency validation: check if declared deps reference existing contexts
-    let bc = model.bounded_contexts.iter().find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name)).unwrap();
-    let all_ctx_names: Vec<&str> = model.bounded_contexts.iter().map(|c| c.name.as_str()).collect();
-    let unknown_deps: Vec<&str> = bc.dependencies.iter()
+    let all_ctx_names: Vec<String> = store.load_desired(workspace_path).ok().flatten()
+        .map(|m| m.bounded_contexts.into_iter().map(|c| c.name).collect())
+        .unwrap_or_default();
+    let unknown_deps: Vec<&str> = dependencies.iter()
         .filter(|d| !all_ctx_names.iter().any(|c| c.eq_ignore_ascii_case(d)))
         .map(|d| d.as_str())
         .collect();
@@ -424,778 +368,328 @@ fn upsert_bounded_context(model: &mut DomainModel, args: &Value) -> ToolCallResu
     text_result(result.to_string())
 }
 
-fn remove_bounded_context(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_bounded_context(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "name");
-    let before = model.bounded_contexts.len();
-    model
-        .bounded_contexts
-        .retain(|bc| !bc.name.eq_ignore_ascii_case(&ctx_name));
-    if model.bounded_contexts.len() < before {
-        text_result(format!("Removed bounded context '{ctx_name}'"))
-    } else {
-        error_result(format!("Bounded context '{ctx_name}' not found"))
+    match store.remove_context(workspace_path, &ctx_name) {
+        Ok(true) => text_result(format!("Removed bounded context '{ctx_name}'")),
+        Ok(false) => error_result(format!("Bounded context '{ctx_name}' not found")),
+        Err(e) => error_result(format!("Failed to remove bounded context: {e}")),
     }
 }
 
-fn upsert_entity(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_entity(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let entity_name = arg_str(args, "name");
-
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_entity(workspace_path, &ctx_name, &entity_name),
+        Err(result) => return result,
     };
-
-    let existing = bc
-        .entities
-        .iter_mut()
-        .find(|e| e.name.eq_ignore_ascii_case(&entity_name));
-
-    match existing {
-        Some(entity) => {
-            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
-                entity.description = desc.to_string();
+    let mut entity = existing.clone().unwrap_or(Entity {
+        name: entity_name.clone(),
+        description: String::new(),
+        aggregate_root: false,
+        fields: vec![],
+        methods: vec![],
+        invariants: vec![],
+    });
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { entity.description = desc.to_string(); }
+    if let Some(agg) = args.get("aggregate_root").and_then(|v| v.as_bool()) { entity.aggregate_root = agg; }
+    if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut entity.fields, fields); }
+    if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) { merge_methods(&mut entity.methods, methods); }
+    if let Some(invariants) = args.get("invariants").and_then(|v| v.as_array()) {
+        for inv in invariants {
+            if let Some(s) = inv.as_str() && !entity.invariants.iter().any(|i| i == s) {
+                entity.invariants.push(s.to_string());
             }
-            if let Some(agg) = args.get("aggregate_root").and_then(|v| v.as_bool()) {
-                entity.aggregate_root = agg;
-            }
-            if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) {
-                merge_fields(&mut entity.fields, fields);
-            }
-            if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) {
-                merge_methods(&mut entity.methods, methods);
-            }
-            if let Some(invariants) = args.get("invariants").and_then(|v| v.as_array()) {
-                for inv in invariants {
-                    if let Some(s) = inv.as_str()
-                        && !entity.invariants.iter().any(|i| i == s)
-                    {
-                        entity.invariants.push(s.to_string());
-                    }
-                }
-            }
-            text_result(json!({
-                "message": format!("Updated entity '{}' in '{}'", entity_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "entity", &entity_name)
-            }).to_string())
-        }
-        None => {
-            let entity = Entity {
-                name: entity_name.clone(),
-                description: arg_str(args, "description"),
-                aggregate_root: args
-                    .get("aggregate_root")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                fields: parse_fields(args.get("fields")),
-                methods: parse_methods(args.get("methods")),
-                invariants: args
-                    .get("invariants")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|i| i.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            };
-            bc.entities.push(entity);
-            text_result(json!({
-                "message": format!("Created entity '{}' in '{}'", entity_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "entity", &entity_name)
-            }).to_string())
         }
     }
+    if let Err(e) = store.upsert_entity(workspace_path, &ctx_name, &entity) {
+        return error_result(format!("Failed to upsert entity: {e}"));
+    }
+    text_result(json!({
+        "message": format!("{} entity '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, entity_name, ctx_name),
+        "suggested_path": suggested_path_for(store, workspace_path, &ctx_name, "entity", &entity_name)
+    }).to_string())
 }
 
-fn remove_entity(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_entity(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let entity_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.entities.len();
-    bc.entities
-        .retain(|e| !e.name.eq_ignore_ascii_case(&entity_name));
-    if bc.entities.len() < before {
-        text_result(format!("Removed entity '{entity_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Entity '{entity_name}' not found in '{ctx_name}'"))
+    match store.remove_entity(workspace_path, &ctx_name, &entity_name) {
+        Ok(true) => text_result(format!("Removed entity '{entity_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Entity '{entity_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove entity: {e}")),
     }
 }
 
-fn upsert_service(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_service(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let svc_name = arg_str(args, "name");
-
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_service(workspace_path, &ctx_name, &svc_name),
+        Err(result) => return result,
     };
-
-    let kind = match args
-        .get("service_kind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("domain")
-    {
-        "application" => ServiceKind::Application,
-        "infrastructure" => ServiceKind::Infrastructure,
-        _ => ServiceKind::Domain,
-    };
-
-    let existing = bc
-        .services
-        .iter_mut()
-        .find(|s| s.name.eq_ignore_ascii_case(&svc_name));
-
-    match existing {
-        Some(svc) => {
-            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
-                svc.description = desc.to_string();
-            }
-            svc.kind = kind;
-            if let Some(deps) = args.get("dependencies").and_then(|v| v.as_array()) {
-                svc.dependencies = deps
-                    .iter()
-                    .filter_map(|d| d.as_str().map(String::from))
-                    .collect();
-            }
-            if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) {
-                merge_methods(&mut svc.methods, methods);
-            }
-            text_result(json!({
-                "message": format!("Updated service '{}' in '{}'", svc_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "service", &svc_name)
-            }).to_string())
-        }
-        None => {
-            bc.services.push(Service {
-                name: svc_name.clone(),
-                description: arg_str(args, "description"),
-                kind,
-                methods: parse_methods(args.get("methods")),
-                dependencies: args
-                    .get("dependencies")
-                    .and_then(|v| v.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|d| d.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            });
-            text_result(json!({
-                "message": format!("Created service '{}' in '{}'", svc_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "service", &svc_name)
-            }).to_string())
-        }
+    let mut service = existing.clone().unwrap_or(Service {
+        name: svc_name.clone(), description: String::new(), kind: ServiceKind::Domain, methods: vec![], dependencies: vec![]
+    });
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { service.description = desc.to_string(); }
+    if args.get("service_kind").is_some() { service.kind = parse_service_kind(&arg_str(args, "service_kind")); }
+    if let Some(deps) = args.get("dependencies").and_then(|v| v.as_array()) { service.dependencies = deps.iter().filter_map(|d| d.as_str().map(String::from)).collect(); }
+    if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) { merge_methods(&mut service.methods, methods); }
+    if let Err(e) = store.upsert_service(workspace_path, &ctx_name, &service) {
+        return error_result(format!("Failed to upsert service: {e}"));
     }
+    text_result(json!({
+        "message": format!("{} service '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, svc_name, ctx_name),
+        "suggested_path": suggested_path_for(store, workspace_path, &ctx_name, "service", &svc_name)
+    }).to_string())
 }
 
-fn remove_service(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_service(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let svc_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.services.len();
-    bc.services
-        .retain(|s| !s.name.eq_ignore_ascii_case(&svc_name));
-    if bc.services.len() < before {
-        text_result(format!("Removed service '{svc_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Service '{svc_name}' not found in '{ctx_name}'"))
+    match store.remove_service(workspace_path, &ctx_name, &svc_name) {
+        Ok(true) => text_result(format!("Removed service '{svc_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Service '{svc_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove service: {e}")),
     }
 }
 
-fn upsert_event(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_event(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let event_name = arg_str(args, "name");
 
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_event(workspace_path, &ctx_name, &event_name),
+        Err(result) => return result,
     };
-
-    let existing = bc
-        .events
-        .iter_mut()
-        .find(|e| e.name.eq_ignore_ascii_case(&event_name));
-
-    match existing {
-        Some(evt) => {
-            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
-                evt.description = desc.to_string();
-            }
-            if let Some(src) = args.get("source").and_then(|v| v.as_str()) {
-                evt.source = src.to_string();
-            }
-            if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) {
-                merge_fields(&mut evt.fields, fields);
-            }
-            text_result(json!({
-                "message": format!("Updated event '{}' in '{}'", event_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "event", &event_name)
-            }).to_string())
-        }
-        None => {
-            bc.events.push(DomainEvent {
-                name: event_name.clone(),
-                description: arg_str(args, "description"),
-                fields: parse_fields(args.get("fields")),
-                source: arg_str(args, "source"),
-            });
-            text_result(json!({
-                "message": format!("Created event '{}' in '{}'", event_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "event", &event_name)
-            }).to_string())
-        }
+    let mut event = existing.clone().unwrap_or(DomainEvent { name: event_name.clone(), description: String::new(), fields: vec![], source: String::new() });
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { event.description = desc.to_string(); }
+    if let Some(src) = args.get("source").and_then(|v| v.as_str()) { event.source = src.to_string(); }
+    if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut event.fields, fields); }
+    if let Err(e) = store.upsert_event(workspace_path, &ctx_name, &event) {
+        return error_result(format!("Failed to upsert event: {e}"));
     }
+    text_result(json!({
+        "message": format!("{} event '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, event_name, ctx_name),
+        "suggested_path": suggested_path_for(store, workspace_path, &ctx_name, "event", &event_name)
+    }).to_string())
 }
 
-fn remove_event(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_event(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let event_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.events.len();
-    bc.events
-        .retain(|e| !e.name.eq_ignore_ascii_case(&event_name));
-    if bc.events.len() < before {
-        text_result(format!("Removed event '{event_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Event '{event_name}' not found in '{ctx_name}'"))
+    match store.remove_event(workspace_path, &ctx_name, &event_name) {
+        Ok(true) => text_result(format!("Removed event '{event_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Event '{event_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove event: {e}")),
     }
 }
 
-fn upsert_value_object(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_value_object(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let vo_name = arg_str(args, "name");
 
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_value_object(workspace_path, &ctx_name, &vo_name),
+        Err(result) => return result,
     };
-
-    let existing = bc
-        .value_objects
-        .iter_mut()
-        .find(|v| v.name.eq_ignore_ascii_case(&vo_name));
-
-    match existing {
-        Some(vo) => {
-            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
-                vo.description = desc.to_string();
+    let mut value_object = existing.clone().unwrap_or(ValueObject { name: vo_name.clone(), description: String::new(), fields: vec![], validation_rules: vec![] });
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { value_object.description = desc.to_string(); }
+    if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut value_object.fields, fields); }
+    if let Some(rules) = args.get("validation_rules").and_then(|v| v.as_array()) {
+        for rule in rules {
+            if let Some(s) = rule.as_str() && !value_object.validation_rules.iter().any(|r| r == s) {
+                value_object.validation_rules.push(s.to_string());
             }
-            if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) {
-                merge_fields(&mut vo.fields, fields);
-            }
-            if let Some(rules) = args.get("validation_rules").and_then(|v| v.as_array()) {
-                for rule in rules {
-                    if let Some(s) = rule.as_str()
-                        && !vo.validation_rules.iter().any(|r| r == s)
-                    {
-                        vo.validation_rules.push(s.to_string());
-                    }
-                }
-            }
-            text_result(json!({
-                "message": format!("Updated value object '{}' in '{}'", vo_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "value_object", &vo_name)
-            }).to_string())
-        }
-        None => {
-            bc.value_objects.push(ValueObject {
-                name: vo_name.clone(),
-                description: arg_str(args, "description"),
-                fields: parse_fields(args.get("fields")),
-                validation_rules: args
-                    .get("validation_rules")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|r| r.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-            });
-            text_result(json!({
-                "message": format!("Created value object '{}' in '{}'", vo_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "value_object", &vo_name)
-            }).to_string())
         }
     }
+    if let Err(e) = store.upsert_value_object(workspace_path, &ctx_name, &value_object) {
+        return error_result(format!("Failed to upsert value object: {e}"));
+    }
+    text_result(json!({
+        "message": format!("{} value object '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, vo_name, ctx_name),
+        "suggested_path": suggested_path_for(store, workspace_path, &ctx_name, "value_object", &vo_name)
+    }).to_string())
 }
 
-fn remove_value_object(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_value_object(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let vo_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.value_objects.len();
-    bc.value_objects.retain(|v| !v.name.eq_ignore_ascii_case(&vo_name));
-    if bc.value_objects.len() < before {
-        text_result(format!("Removed value object '{vo_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Value object '{vo_name}' not found in '{ctx_name}'"))
+    match store.remove_value_object(workspace_path, &ctx_name, &vo_name) {
+        Ok(true) => text_result(format!("Removed value object '{vo_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Value object '{vo_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove value object: {e}")),
     }
 }
 
-fn upsert_repository(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_repository(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let repo_name = arg_str(args, "name");
 
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_repository(workspace_path, &ctx_name, &repo_name),
+        Err(result) => return result,
     };
-
-    let existing = bc
-        .repositories
-        .iter_mut()
-        .find(|r| r.name.eq_ignore_ascii_case(&repo_name));
-
-    match existing {
-        Some(repo) => {
-            if let Some(agg) = args.get("aggregate").and_then(|v| v.as_str()) {
-                repo.aggregate = agg.to_string();
-            }
-            if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) {
-                merge_methods(&mut repo.methods, methods);
-            }
-            text_result(json!({
-                "message": format!("Updated repository '{}' in '{}'", repo_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "repository", &repo_name)
-            }).to_string())
-        }
-        None => {
-            bc.repositories.push(Repository {
-                name: repo_name.clone(),
-                aggregate: arg_str(args, "aggregate"),
-                methods: parse_methods(args.get("methods")),
-            });
-            text_result(json!({
-                "message": format!("Created repository '{}' in '{}'", repo_name, ctx_name),
-                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "repository", &repo_name)
-            }).to_string())
-        }
+    let mut repository = existing.clone().unwrap_or(Repository { name: repo_name.clone(), aggregate: String::new(), methods: vec![] });
+    if let Some(agg) = args.get("aggregate").and_then(|v| v.as_str()) { repository.aggregate = agg.to_string(); }
+    if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) { merge_methods(&mut repository.methods, methods); }
+    if let Err(e) = store.upsert_repository(workspace_path, &ctx_name, &repository) {
+        return error_result(format!("Failed to upsert repository: {e}"));
     }
+    text_result(json!({
+        "message": format!("{} repository '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, repo_name, ctx_name),
+        "suggested_path": suggested_path_for(store, workspace_path, &ctx_name, "repository", &repo_name)
+    }).to_string())
 }
 
-fn remove_repository(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_repository(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let repo_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.repositories.len();
-    bc.repositories.retain(|r| !r.name.eq_ignore_ascii_case(&repo_name));
-    if bc.repositories.len() < before {
-        text_result(format!("Removed repository '{repo_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Repository '{repo_name}' not found in '{ctx_name}'"))
+    match store.remove_repository(workspace_path, &ctx_name, &repo_name) {
+        Ok(true) => text_result(format!("Removed repository '{repo_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Repository '{repo_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove repository: {e}")),
     }
 }
 
-fn upsert_aggregate(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_aggregate(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let aggregate_name = arg_str(args, "name");
 
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_aggregate(workspace_path, &ctx_name, &aggregate_name),
+        Err(result) => return result,
     };
-
-    let entities = parse_string_array(args.get("entities"));
-    let value_objects = parse_string_array(args.get("value_objects"));
-    let ownership = parse_ownership(args.get("ownership"));
-
-    match bc
-        .aggregates
-        .iter_mut()
-        .find(|a| a.name.eq_ignore_ascii_case(&aggregate_name))
-    {
-        Some(aggregate) => {
-            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
-                aggregate.description = description.to_string();
-            }
-            if let Some(root_entity) = args.get("root_entity").and_then(|v| v.as_str()) {
-                aggregate.root_entity = root_entity.to_string();
-            }
-            if args.get("entities").is_some() {
-                aggregate.entities = entities;
-            }
-            if args.get("value_objects").is_some() {
-                aggregate.value_objects = value_objects;
-            }
-            if args.get("ownership").is_some() {
-                aggregate.ownership = ownership;
-            }
-            text_result(json!({
-                "message": format!("Updated aggregate '{}' in '{}'", aggregate_name, ctx_name)
-            }).to_string())
-        }
-        None => {
-            bc.aggregates.push(Aggregate {
-                name: aggregate_name.clone(),
-                description: arg_str(args, "description"),
-                root_entity: arg_str(args, "root_entity"),
-                entities,
-                value_objects,
-                ownership,
-            });
-            text_result(json!({
-                "message": format!("Created aggregate '{}' in '{}'", aggregate_name, ctx_name)
-            }).to_string())
-        }
+    let mut aggregate = existing.clone().unwrap_or(Aggregate { name: aggregate_name.clone(), description: String::new(), root_entity: String::new(), entities: vec![], value_objects: vec![], ownership: Ownership::default() });
+    if let Some(description) = args.get("description").and_then(|v| v.as_str()) { aggregate.description = description.to_string(); }
+    if let Some(root_entity) = args.get("root_entity").and_then(|v| v.as_str()) { aggregate.root_entity = root_entity.to_string(); }
+    if args.get("entities").is_some() { aggregate.entities = parse_string_array(args.get("entities")); }
+    if args.get("value_objects").is_some() { aggregate.value_objects = parse_string_array(args.get("value_objects")); }
+    if args.get("ownership").is_some() { aggregate.ownership = parse_ownership(args.get("ownership")); }
+    if let Err(e) = store.upsert_aggregate(workspace_path, &ctx_name, &aggregate) {
+        return error_result(format!("Failed to upsert aggregate: {e}"));
     }
+    text_result(json!({"message": format!("{} aggregate '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, aggregate_name, ctx_name)}).to_string())
 }
 
-fn remove_aggregate(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_aggregate(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let aggregate_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.aggregates.len();
-    bc.aggregates
-        .retain(|a| !a.name.eq_ignore_ascii_case(&aggregate_name));
-    if bc.aggregates.len() < before {
-        text_result(format!("Removed aggregate '{aggregate_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Aggregate '{aggregate_name}' not found in '{ctx_name}'"))
+    match store.remove_aggregate(workspace_path, &ctx_name, &aggregate_name) {
+        Ok(true) => text_result(format!("Removed aggregate '{aggregate_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Aggregate '{aggregate_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove aggregate: {e}")),
     }
 }
 
-fn upsert_policy(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_policy(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let policy_name = arg_str(args, "name");
 
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_policy(workspace_path, &ctx_name, &policy_name),
+        Err(result) => return result,
     };
-
-    let triggers = parse_string_array(args.get("triggers"));
-    let commands = parse_string_array(args.get("commands"));
-    let ownership = parse_ownership(args.get("ownership"));
-
-    match bc
-        .policies
-        .iter_mut()
-        .find(|p| p.name.eq_ignore_ascii_case(&policy_name))
-    {
-        Some(policy) => {
-            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
-                policy.description = description.to_string();
-            }
-            if let Some(kind) = args.get("policy_kind").and_then(|v| v.as_str()) {
-                policy.kind = parse_policy_kind(kind);
-            }
-            if args.get("triggers").is_some() {
-                policy.triggers = triggers;
-            }
-            if args.get("commands").is_some() {
-                policy.commands = commands;
-            }
-            if args.get("ownership").is_some() {
-                policy.ownership = ownership;
-            }
-            text_result(json!({
-                "message": format!("Updated policy '{}' in '{}'", policy_name, ctx_name)
-            }).to_string())
-        }
-        None => {
-            bc.policies.push(Policy {
-                name: policy_name.clone(),
-                description: arg_str(args, "description"),
-                kind: parse_policy_kind(&arg_str(args, "policy_kind")),
-                triggers,
-                commands,
-                ownership,
-            });
-            text_result(json!({
-                "message": format!("Created policy '{}' in '{}'", policy_name, ctx_name)
-            }).to_string())
-        }
+    let mut policy = existing.clone().unwrap_or(Policy { name: policy_name.clone(), description: String::new(), kind: PolicyKind::Domain, triggers: vec![], commands: vec![], ownership: Ownership::default() });
+    if let Some(description) = args.get("description").and_then(|v| v.as_str()) { policy.description = description.to_string(); }
+    if args.get("policy_kind").is_some() { policy.kind = parse_policy_kind(&arg_str(args, "policy_kind")); }
+    if args.get("triggers").is_some() { policy.triggers = parse_string_array(args.get("triggers")); }
+    if args.get("commands").is_some() { policy.commands = parse_string_array(args.get("commands")); }
+    if args.get("ownership").is_some() { policy.ownership = parse_ownership(args.get("ownership")); }
+    if let Err(e) = store.upsert_policy(workspace_path, &ctx_name, &policy) {
+        return error_result(format!("Failed to upsert policy: {e}"));
     }
+    text_result(json!({"message": format!("{} policy '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, policy_name, ctx_name)}).to_string())
 }
 
-fn remove_policy(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_policy(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let policy_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.policies.len();
-    bc.policies
-        .retain(|p| !p.name.eq_ignore_ascii_case(&policy_name));
-    if bc.policies.len() < before {
-        text_result(format!("Removed policy '{policy_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Policy '{policy_name}' not found in '{ctx_name}'"))
+    match store.remove_policy(workspace_path, &ctx_name, &policy_name) {
+        Ok(true) => text_result(format!("Removed policy '{policy_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Policy '{policy_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove policy: {e}")),
     }
 }
 
-fn upsert_read_model(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_read_model(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let read_model_name = arg_str(args, "name");
 
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_read_model(workspace_path, &ctx_name, &read_model_name),
+        Err(result) => return result,
     };
-
-    let ownership = parse_ownership(args.get("ownership"));
-    match bc
-        .read_models
-        .iter_mut()
-        .find(|rm| rm.name.eq_ignore_ascii_case(&read_model_name))
-    {
-        Some(read_model) => {
-            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
-                read_model.description = description.to_string();
-            }
-            if let Some(source) = args.get("source").and_then(|v| v.as_str()) {
-                read_model.source = source.to_string();
-            }
-            if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) {
-                merge_fields(&mut read_model.fields, fields);
-            }
-            if args.get("ownership").is_some() {
-                read_model.ownership = ownership;
-            }
-            text_result(json!({
-                "message": format!("Updated read model '{}' in '{}'", read_model_name, ctx_name)
-            }).to_string())
-        }
-        None => {
-            bc.read_models.push(ReadModel {
-                name: read_model_name.clone(),
-                description: arg_str(args, "description"),
-                source: arg_str(args, "source"),
-                fields: parse_fields(args.get("fields")),
-                ownership,
-            });
-            text_result(json!({
-                "message": format!("Created read model '{}' in '{}'", read_model_name, ctx_name)
-            }).to_string())
-        }
+    let mut read_model = existing.clone().unwrap_or(ReadModel { name: read_model_name.clone(), description: String::new(), source: String::new(), fields: vec![], ownership: Ownership::default() });
+    if let Some(description) = args.get("description").and_then(|v| v.as_str()) { read_model.description = description.to_string(); }
+    if let Some(source) = args.get("source").and_then(|v| v.as_str()) { read_model.source = source.to_string(); }
+    if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut read_model.fields, fields); }
+    if args.get("ownership").is_some() { read_model.ownership = parse_ownership(args.get("ownership")); }
+    if let Err(e) = store.upsert_read_model(workspace_path, &ctx_name, &read_model) {
+        return error_result(format!("Failed to upsert read model: {e}"));
     }
+    text_result(json!({"message": format!("{} read model '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, read_model_name, ctx_name)}).to_string())
 }
 
-fn remove_read_model(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_read_model(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let read_model_name = arg_str(args, "name");
-    let bc = match model
-        .bounded_contexts
-        .iter_mut()
-        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
-    {
-        Some(bc) => bc,
-        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
-    };
-    let before = bc.read_models.len();
-    bc.read_models
-        .retain(|rm| !rm.name.eq_ignore_ascii_case(&read_model_name));
-    if bc.read_models.len() < before {
-        text_result(format!("Removed read model '{read_model_name}' from '{ctx_name}'"))
-    } else {
-        error_result(format!("Read model '{read_model_name}' not found in '{ctx_name}'"))
+    match store.remove_read_model(workspace_path, &ctx_name, &read_model_name) {
+        Ok(true) => text_result(format!("Removed read model '{read_model_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Read model '{read_model_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove read model: {e}")),
     }
 }
 
-fn upsert_external_system(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_external_system(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let system_name = arg_str(args, "name");
-    let ownership = parse_ownership(args.get("ownership"));
-    let consumed_by_contexts = parse_string_array(args.get("consumed_by_contexts"));
-
-    match model
-        .external_systems
-        .iter_mut()
-        .find(|s| s.name.eq_ignore_ascii_case(&system_name))
-    {
-        Some(system) => {
-            if let Some(description) = args.get("description").and_then(|v| v.as_str()) {
-                system.description = description.to_string();
-            }
-            if let Some(kind) = args.get("kind_label").and_then(|v| v.as_str()) {
-                system.kind = kind.to_string();
-            }
-            if let Some(rationale) = args.get("rationale").and_then(|v| v.as_str()) {
-                system.rationale = rationale.to_string();
-            }
-            if args.get("consumed_by_contexts").is_some() {
-                system.consumed_by_contexts = consumed_by_contexts;
-            }
-            if args.get("ownership").is_some() {
-                system.ownership = ownership;
-            }
-            text_result(json!({
-                "message": format!("Updated external system '{}'", system_name)
-            }).to_string())
-        }
-        None => {
-            model.external_systems.push(ExternalSystem {
-                name: system_name.clone(),
-                description: arg_str(args, "description"),
-                kind: arg_str(args, "kind_label"),
-                consumed_by_contexts,
-                rationale: arg_str(args, "rationale"),
-                ownership,
-            });
-            text_result(json!({
-                "message": format!("Created external system '{}'", system_name)
-            }).to_string())
-        }
+    let existing = store.query_external_system(workspace_path, &system_name);
+    let mut system = existing.clone().unwrap_or(ExternalSystem { name: system_name.clone(), description: String::new(), kind: String::new(), consumed_by_contexts: vec![], rationale: String::new(), ownership: Ownership::default() });
+    if let Some(description) = args.get("description").and_then(|v| v.as_str()) { system.description = description.to_string(); }
+    if let Some(kind) = args.get("kind_label").and_then(|v| v.as_str()) { system.kind = kind.to_string(); }
+    if let Some(rationale) = args.get("rationale").and_then(|v| v.as_str()) { system.rationale = rationale.to_string(); }
+    if args.get("consumed_by_contexts").is_some() { system.consumed_by_contexts = parse_string_array(args.get("consumed_by_contexts")); }
+    if args.get("ownership").is_some() { system.ownership = parse_ownership(args.get("ownership")); }
+    if let Err(e) = store.upsert_external_system(workspace_path, &system) {
+        return error_result(format!("Failed to upsert external system: {e}"));
     }
+    text_result(json!({"message": format!("{} external system '{}'", if existing.is_some() { "Updated" } else { "Created" }, system_name)}).to_string())
 }
 
-fn remove_external_system(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_external_system(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let system_name = arg_str(args, "name");
-    let before = model.external_systems.len();
-    model.external_systems
-        .retain(|s| !s.name.eq_ignore_ascii_case(&system_name));
-    if model.external_systems.len() < before {
-        text_result(format!("Removed external system '{system_name}'"))
-    } else {
-        error_result(format!("External system '{system_name}' not found"))
+    match store.remove_external_system(workspace_path, &system_name) {
+        Ok(true) => text_result(format!("Removed external system '{system_name}'")),
+        Ok(false) => error_result(format!("External system '{system_name}' not found")),
+        Err(e) => error_result(format!("Failed to remove external system: {e}")),
     }
 }
 
-fn upsert_architectural_decision(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn upsert_architectural_decision(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let decision_id = arg_str(args, "name");
-    let ownership = parse_ownership(args.get("ownership"));
-    let contexts = parse_string_array(args.get("contexts"));
-    let consequences = parse_string_array(args.get("consequences"));
-
-    match model
-        .architectural_decisions
-        .iter_mut()
-        .find(|d| d.id.eq_ignore_ascii_case(&decision_id))
-    {
-        Some(decision) => {
-            if let Some(title) = args.get("title").and_then(|v| v.as_str()) {
-                decision.title = title.to_string();
-            }
-            if let Some(status) = args.get("status").and_then(|v| v.as_str()) {
-                decision.status = parse_decision_status(status);
-            }
-            if let Some(scope) = args.get("scope").and_then(|v| v.as_str()) {
-                decision.scope = scope.to_string();
-            }
-            if let Some(date) = args.get("date").and_then(|v| v.as_str()) {
-                decision.date = date.to_string();
-            }
-            if let Some(rationale) = args.get("rationale").and_then(|v| v.as_str()) {
-                decision.rationale = rationale.to_string();
-            }
-            if args.get("contexts").is_some() {
-                decision.contexts = contexts;
-            }
-            if args.get("consequences").is_some() {
-                decision.consequences = consequences;
-            }
-            if args.get("ownership").is_some() {
-                decision.ownership = ownership;
-            }
-            text_result(json!({
-                "message": format!("Updated architectural decision '{}'", decision_id)
-            }).to_string())
-        }
-        None => {
-            model.architectural_decisions.push(ArchitecturalDecision {
-                id: decision_id.clone(),
-                title: arg_str(args, "title"),
-                status: parse_decision_status(&arg_str(args, "status")),
-                scope: arg_str(args, "scope"),
-                date: arg_str(args, "date"),
-                rationale: arg_str(args, "rationale"),
-                consequences,
-                contexts,
-                ownership,
-            });
-            text_result(json!({
-                "message": format!("Created architectural decision '{}'", decision_id)
-            }).to_string())
-        }
+    let existing = store.query_architectural_decision(workspace_path, &decision_id);
+    let mut decision = existing.clone().unwrap_or(ArchitecturalDecision { id: decision_id.clone(), title: String::new(), status: DecisionStatus::Proposed, scope: String::new(), date: String::new(), rationale: String::new(), consequences: vec![], contexts: vec![], ownership: Ownership::default() });
+    if let Some(title) = args.get("title").and_then(|v| v.as_str()) { decision.title = title.to_string(); }
+    if args.get("status").is_some() { decision.status = parse_decision_status(&arg_str(args, "status")); }
+    if let Some(scope) = args.get("scope").and_then(|v| v.as_str()) { decision.scope = scope.to_string(); }
+    if let Some(date) = args.get("date").and_then(|v| v.as_str()) { decision.date = date.to_string(); }
+    if let Some(rationale) = args.get("rationale").and_then(|v| v.as_str()) { decision.rationale = rationale.to_string(); }
+    if args.get("contexts").is_some() { decision.contexts = parse_string_array(args.get("contexts")); }
+    if args.get("consequences").is_some() { decision.consequences = parse_string_array(args.get("consequences")); }
+    if args.get("ownership").is_some() { decision.ownership = parse_ownership(args.get("ownership")); }
+    if let Err(e) = store.upsert_architectural_decision(workspace_path, &decision) {
+        return error_result(format!("Failed to upsert architectural decision: {e}"));
     }
+    text_result(json!({"message": format!("{} architectural decision '{}'", if existing.is_some() { "Updated" } else { "Created" }, decision_id)}).to_string())
 }
 
-fn remove_architectural_decision(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+fn remove_architectural_decision(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let decision_id = arg_str(args, "name");
-    let before = model.architectural_decisions.len();
-    model.architectural_decisions
-        .retain(|d| !d.id.eq_ignore_ascii_case(&decision_id));
-    if model.architectural_decisions.len() < before {
-        text_result(format!("Removed architectural decision '{decision_id}'"))
-    } else {
-        error_result(format!("Architectural decision '{decision_id}' not found"))
+    match store.remove_architectural_decision(workspace_path, &decision_id) {
+        Ok(true) => text_result(format!("Removed architectural decision '{decision_id}'")),
+        Ok(false) => error_result(format!("Architectural decision '{decision_id}' not found")),
+        Err(e) => error_result(format!("Failed to remove architectural decision: {e}")),
     }
 }
 
@@ -1251,6 +745,14 @@ fn parse_policy_kind(kind: &str) -> PolicyKind {
     }
 }
 
+fn parse_service_kind(kind: &str) -> ServiceKind {
+    match kind {
+        "application" => ServiceKind::Application,
+        "infrastructure" => ServiceKind::Infrastructure,
+        _ => ServiceKind::Domain,
+    }
+}
+
 fn parse_decision_status(status: &str) -> DecisionStatus {
     match status {
         "accepted" => DecisionStatus::Accepted,
@@ -1258,6 +760,30 @@ fn parse_decision_status(status: &str) -> DecisionStatus {
         "deprecated" => DecisionStatus::Deprecated,
         _ => DecisionStatus::Proposed,
     }
+}
+
+fn require_context(store: &Store, workspace_path: &str, ctx_name: &str) -> Result<(), ToolCallResult> {
+    let exists = store
+        .load_desired(workspace_path)
+        .ok()
+        .flatten()
+        .map(|model| model.bounded_contexts.iter().any(|bc| bc.name.eq_ignore_ascii_case(ctx_name)))
+        .unwrap_or(false);
+    if exists {
+        Ok(())
+    } else {
+        Err(error_result(format!("Bounded context '{ctx_name}' not found")))
+    }
+}
+
+fn suggested_path_for(store: &Store, workspace_path: &str, context: &str, kind: &str, name: &str) -> String {
+    let pattern = store
+        .load_desired(workspace_path)
+        .ok()
+        .flatten()
+        .map(|model| model.conventions.file_structure.pattern)
+        .unwrap_or_default();
+    suggest_path(&pattern, context, kind, name)
 }
 
 /// Compute the suggested file path for a domain artifact, using project conventions.
@@ -1684,6 +1210,160 @@ mod tests {
         let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
         assert_eq!(identity.events.len(), 1);
         assert_eq!(identity.events[0].name, "UserRegistered");
+    }
+
+    #[test]
+    fn test_upsert_aggregate_persists_members_and_ownership() {
+        let ws = "/tmp/test-upsert-aggregate";
+        let store = setup(ws);
+
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "aggregate",
+            "context": "Identity",
+            "name": "UserAggregate",
+            "description": "User consistency boundary",
+            "root_entity": "User",
+            "entities": ["User"],
+            "value_objects": ["EmailAddress"],
+            "ownership": {
+                "team": "Identity Team",
+                "owners": ["alice"],
+                "rationale": "Owns authentication"
+            }
+        }));
+
+        assert!(result.is_error.is_none());
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        let aggregate = identity.aggregates.iter().find(|a| a.name == "UserAggregate").unwrap();
+        assert_eq!(aggregate.root_entity, "User");
+        assert_eq!(aggregate.entities, vec!["User"]);
+        assert_eq!(aggregate.value_objects, vec!["EmailAddress"]);
+        assert_eq!(aggregate.ownership.team, "Identity Team");
+    }
+
+    #[test]
+    fn test_upsert_policy_merges_links() {
+        let ws = "/tmp/test-upsert-policy";
+        let store = setup(ws);
+
+        call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "policy",
+            "context": "Identity",
+            "name": "WelcomePolicy",
+            "policy_kind": "process_manager",
+            "triggers": ["UserRegistered"],
+            "commands": ["SendWelcomeEmail"]
+        }));
+
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "policy",
+            "context": "Identity",
+            "name": "WelcomePolicy",
+            "commands": ["SendWelcomeEmail", "CreateAuditEntry"]
+        }));
+
+        assert!(result.is_error.is_none());
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        let policy = identity.policies.iter().find(|p| p.name == "WelcomePolicy").unwrap();
+        assert!(matches!(policy.kind, PolicyKind::ProcessManager));
+        assert_eq!(policy.triggers, vec!["UserRegistered"]);
+        assert_eq!(policy.commands, vec!["SendWelcomeEmail", "CreateAuditEntry"]);
+    }
+
+    #[test]
+    fn test_upsert_read_model_merges_fields() {
+        let ws = "/tmp/test-upsert-read-model";
+        let store = setup(ws);
+
+        call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "read_model",
+            "context": "Identity",
+            "name": "UserProfileView",
+            "source": "User",
+            "fields": [{"name": "id", "type": "UserId", "required": true}]
+        }));
+
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "read_model",
+            "context": "Identity",
+            "name": "UserProfileView",
+            "fields": [{"name": "email", "type": "String", "required": true}]
+        }));
+
+        assert!(result.is_error.is_none());
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        let read_model = identity.read_models.iter().find(|rm| rm.name == "UserProfileView").unwrap();
+        assert_eq!(read_model.fields.len(), 2);
+        assert!(read_model.fields.iter().any(|f| f.name == "id"));
+        assert!(read_model.fields.iter().any(|f| f.name == "email"));
+    }
+
+    #[test]
+    fn test_upsert_external_system_and_decision() {
+        let ws = "/tmp/test-upsert-boundaries";
+        let store = setup(ws);
+
+        let system_result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "external_system",
+            "name": "Stripe",
+            "description": "Payment processor",
+            "kind_label": "saas",
+            "consumed_by_contexts": ["Identity"],
+            "rationale": "Delegates payments"
+        }));
+        assert!(system_result.is_error.is_none());
+
+        let decision_result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "architectural_decision",
+            "name": "ADR-001",
+            "title": "Use Stripe for payments",
+            "status": "accepted",
+            "scope": "payments",
+            "date": "2026-03-06",
+            "rationale": "Reduce PCI burden",
+            "contexts": ["Identity"],
+            "consequences": ["External dependency introduced"]
+        }));
+        assert!(decision_result.is_error.is_none());
+
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        assert_eq!(loaded.external_systems.len(), 1);
+        assert_eq!(loaded.external_systems[0].name, "Stripe");
+        assert_eq!(loaded.external_systems[0].consumed_by_contexts, vec!["Identity"]);
+        assert_eq!(loaded.architectural_decisions.len(), 1);
+        assert!(matches!(loaded.architectural_decisions[0].status, DecisionStatus::Accepted));
+        assert_eq!(loaded.architectural_decisions[0].contexts, vec!["Identity"]);
+    }
+
+    #[test]
+    fn test_remove_expressive_elements() {
+        let ws = "/tmp/test-remove-expressive";
+        let store = setup(ws);
+
+        call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "aggregate", "context": "Identity", "name": "UserAggregate", "root_entity": "User"
+        }));
+        call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "external_system", "name": "Stripe"
+        }));
+
+        let rm_aggregate = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "aggregate", "action": "remove", "context": "Identity", "name": "UserAggregate"
+        }));
+        let rm_system = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "external_system", "action": "remove", "name": "Stripe"
+        }));
+
+        assert!(rm_aggregate.is_error.is_none());
+        assert!(rm_system.is_error.is_none());
+
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        assert!(identity.aggregates.is_empty());
+        assert!(loaded.external_systems.is_empty());
     }
 
     #[test]

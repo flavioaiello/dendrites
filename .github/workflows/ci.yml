@@ -57,32 +57,12 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      - name: Import committed model
+      - name: Seed desired model via MCP set_model
         run: |
-          if [ -f dendrites.json ]; then
-            ./target/release/dendrites import dendrites.json -w "${{ github.workspace }}"
-          else
-            echo "No dendrites.json found — skipping import"
-          fi
+          echo "Domain model is managed via MCP tools and stored in CozoDB — no JSON import needed."
 
       - name: Scan actual model from AST
-        run: |
-          if [ -f dendrites.json ]; then
-            ./target/release/dendrites scan -w "${{ github.workspace }}"
-          fi
+        run: ./target/release/dendrites scan -w "${{ github.workspace }}"
 
       - name: Check for layer violations
-        run: |
-          if [ -f dendrites.json ]; then
-            ./target/release/dendrites check -w "${{ github.workspace }}"
-          fi
-
-      - name: Validate exported model matches committed
-        run: |
-          if [ -f dendrites.json ]; then
-            ./target/release/dendrites export /tmp/dendrites-ci.json -w "${{ github.workspace }}"
-            if ! diff -q dendrites.json /tmp/dendrites-ci.json > /dev/null 2>&1; then
-              echo "::warning::dendrites.json is stale — re-export after model changes"
-              diff dendrites.json /tmp/dendrites-ci.json || true
-            fi
-          fi
+        run: ./target/release/dendrites check -w "${{ github.workspace }}"

@@ -69,19 +69,10 @@ cargo build --release
 cargo install --path .
 ```
 
-### 2. Import Your Domain Model (optional)
-
-If you have an existing `dendrites.json`, import it into the local store:
-
-```bash
-dendrites import dendrites.json --workspace /path/to/your/project
-```
+### 2. Integrate with VS Code / GitHub Copilot
 
 The model is stored in `~/.dendrites/dendrites.db` (CozoDB), keyed by workspace path.
-If you skip this step, Dendrites starts with an empty model that Copilot can populate via `mcp_dendrites_set_model`.
-Imported models are set as both actual and desired — a clean starting point.
-
-### 3. Integrate with VS Code / GitHub Copilot
+Dendrites starts with an empty model that Copilot can populate via `mcp_dendrites_set_model`.
 
 Add to your project's `.vscode/mcp.json`:
 
@@ -105,11 +96,17 @@ After installing, **restart VS Code** or run `> MCP: List Servers` from the comm
 # Start MCP server (used by VS Code, not called manually)
 dendrites serve --workspace /path/to/project
 
-# Import a dendrites.json file into the local store
-dendrites import dendrites.json --workspace /path/to/project
-
-# Export a project's model back to JSON
+# Export desired model to JSON
 dendrites export model.json --workspace /path/to/project
+
+# Export actual model (from AST scan)
+dendrites export actual.json --workspace /path/to/project --state actual
+
+# Export both desired and actual together
+dendrites export both.json --workspace /path/to/project --state both
+
+# Scan source code to populate actual state
+dendrites scan --workspace /path/to/project
 
 # List all stored projects
 dendrites list
@@ -178,7 +175,7 @@ Dendrites runs a **hot background file watcher** on your workspace's `src/` dire
 
 ## Domain Model Schema
 
-The `dendrites.json` file describes your entire system architecture:
+The domain model stored in CozoDB describes your entire system architecture:
 
 ```
 DomainModel
@@ -239,9 +236,9 @@ This means:
 
 - **Multi-project support**: Each workspace gets its own isolated model pair
 - **Explicit acceptance**: The actual model only changes when you say so
-- **No per-project config files needed**: The model lives centrally on the dev machine
-- **Portable import/export**: Use `dendrites import` / `export` to share models via `dendrites.json` files
-- **Version control friendly**: Export to `dendrites.json` when you want to commit the model to git
+- **No per-project config files needed**: The model lives centrally in the CozoDB store
+- **Portable export**: Use `dendrites export --state actual|desired|both` to serialize models
+- **Graph-native persistence**: All domain concepts are first-class relational tuples, not JSON blobs
 
 ## Architectural Enforcement
 
@@ -298,8 +295,8 @@ cargo test
 # Run with debug logging
 RUST_LOG=debug cargo run -- serve --workspace .
 
-# Import the example model
-cargo run -- import dendrites.json --workspace /path/to/project
+# Export a model
+cargo run -- export model.json --workspace /path/to/project --state desired
 
 # List stored projects
 cargo run -- list
