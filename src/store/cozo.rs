@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use cozo::{DbInstance, ScriptMutability};
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::domain::model::*;
 
@@ -20,12 +20,6 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (or create) the store at the default location `~/.dendrites/dendrites.db`.
-    pub fn open_default() -> Result<Self> {
-        let db_path = default_db_path()?;
-        Self::open(&db_path)
-    }
-
     /// Open (or create) the store at a specific path.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -2474,11 +2468,6 @@ pub struct ContextComplexity {
 }
 
 // ── Helper Functions ───────────────────────────────────────────────────────
-
-fn default_db_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    Ok(home.join(".dendrites").join("dendrites.db"))
-}
 
 /// Normalize workspace path for consistent keying.
 pub fn canonicalize_path(path: &str) -> String {

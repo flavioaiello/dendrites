@@ -1,24 +1,19 @@
 use crate::domain::analyze::scan_actual_model;
-use crate::store::Store;
+use crate::store::CrateRegistry;
 use anyhow::Result;
 use notify::{Event, RecursiveMode, Watcher};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
 pub struct ActualStateWatcher {
-    workspace_root: PathBuf,
-    store: Arc<Store>,
+    registry: Arc<CrateRegistry>,
 }
 
 impl ActualStateWatcher {
-    pub fn new(workspace_root: impl Into<PathBuf>, store: Arc<Store>) -> Self {
-        Self {
-            workspace_root: workspace_root.into(),
-            store,
-        }
+    pub fn new(registry: Arc<CrateRegistry>) -> Self {
+        Self { registry }
     }
 
     /// Spawns the watcher on a background Tokio task
@@ -28,31 +23,31 @@ impl ActualStateWatcher {
         // 1. Initialize the file system watcher
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             if let Ok(event) = res {
-                // Filter out non-code changes (e.g. only watch .rs files)
                 let is_rust_file = event.paths.iter().any(|p| {
+                    // Filter: only .rs files, never inside target/ directories
                     p.extension().is_some_and(|ext| ext == "rs")
+                        && !p.components().any(|c| {
+                            c.as_os_str() == "target"
+                        })
                 });
 
                 if is_rust_file {
-                    // We just need a generic signal, so try_send is perfect.
-                    // If the channel is full, a sync is already queued.
                     let _ = tx.try_send(());
                 }
             }
         })?;
 
-        // Watch the src/ directory specifically to avoid target/ build artifacts
-        let src_path = self.workspace_root.join("src");
-        if src_path.exists() {
-            watcher.watch(&src_path, RecursiveMode::Recursive)?;
-            info!("Started background AST watcher on {}", src_path.display());
-        } else {
-            watcher.watch(&self.workspace_root, RecursiveMode::Recursive)?;
-            info!("Started background AST watcher on {}", self.workspace_root.display());
-        }
+        // Watch the workspace root recursively.
+        // The event filter above excludes target/ and non-.rs files.
+        let workspace_root = self.registry.workspace_root();
+        watcher.watch(workspace_root, RecursiveMode::Recursive)?;
+        info!(
+            "Started background AST watcher on {} ({} crate(s))",
+            workspace_root.display(),
+            self.registry.crates().len()
+        );
 
-        let store = self.store;
-        let root = self.workspace_root;
+        let registry = self.registry;
 
         tokio::spawn(async move {
             // Keep the watcher alive by moving it into the task
@@ -79,7 +74,7 @@ impl ActualStateWatcher {
                         _ = sleep(debounce_duration) => {
                             // Timer expired, time to sync!
                             info!("Code modification detected. Syncing Actual Model...");
-                            if let Err(e) = sync_actual_model(&root, &store).await {
+                            if let Err(e) = sync_all_crates(&registry).await {
                                 error!("Failed to sync actual model: {}", e);
                             }
                             break; // Done with this batch, go back to waiting for the next first event
@@ -93,18 +88,32 @@ impl ActualStateWatcher {
     }
 }
 
-/// Helper function to perform the AST extraction and DB transaction
-async fn sync_actual_model(workspace_root: &Path, store: &Arc<Store>) -> Result<()> {
-    // We need the Desired model so `scan_actual_model` knows how to map structs to contexts
-    let workspace_str = workspace_root.to_string_lossy().to_string();
-    let desired_model = store.load_desired(&workspace_str)?.unwrap_or_else(|| crate::domain::model::DomainModel::empty(&workspace_str));
+/// Sync the actual model for every crate in the registry.
+///
+/// Each crate is scanned independently: its own `src/` directory is parsed via
+/// the AST walker and the result is saved into that crate's local store.
+async fn sync_all_crates(registry: &CrateRegistry) -> Result<()> {
+    for entry in registry.crates() {
+        let ws = entry.workspace_key();
 
-    // Extract structure from source code AST
-    let actual_model = scan_actual_model(workspace_root, &desired_model)?;
+        // Desired model is optional enrichment, not a gate
+        let desired = entry.store.load_desired(&ws)?;
 
-    // Promote the AST extraction into the Actual state database relation
-    store.save_actual(&workspace_str, &actual_model)?;
+        // Full bottom-up AST scan scoped to this crate's root
+        let actual = scan_actual_model(&entry.root, desired.as_ref())?;
 
-    info!("Actual model successfully synced with codebase.");
+        // Save into this crate's local store
+        entry.store.save_actual(&ws, &actual)?;
+
+        // Auto-bootstrap: if desired state is empty (first-time scan), seed it
+        // from the freshly discovered actual state so the model is immediately
+        // ready for refinement without requiring a manual `reset`.
+        if entry.store.load_desired(&ws)?.is_none() {
+            entry.store.reset(&ws)?;
+            info!("Bootstrapped desired model from actual for crate '{}'", entry.name);
+        }
+
+        info!("Synced actual model for crate '{}'", entry.name);
+    }
     Ok(())
 }

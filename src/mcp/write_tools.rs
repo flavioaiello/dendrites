@@ -265,17 +265,9 @@ fn dispatch_write_tool(
                     use crate::domain::analyze::scan_actual_model;
 
                     let workspace_root = std::path::Path::new(workspace_path);
-                    let desired = store.load_desired(workspace_path).ok().flatten()
-                        .unwrap_or_else(|| DomainModel::empty(workspace_path));
+                    let desired = store.load_desired(workspace_path).ok().flatten();
 
-                    if desired.bounded_contexts.is_empty() {
-                        return error_result(
-                            "No bounded contexts in the desired model. \
-                             Seed the model first with set_model before scanning."
-                        );
-                    }
-
-                    match scan_actual_model(workspace_root, &desired) {
+                    match scan_actual_model(workspace_root, desired.as_ref()) {
                         Ok(actual) => {
                             let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
                             let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 
 use super::model::*;
@@ -251,116 +251,370 @@ fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMe
     Ok((all_structs, all_methods))
 }
 
-/// Scan the workspace guided by the desired model's bounded contexts.
+// ─── Crate Discovery ──────────────────────────────────────────────────────
+
+/// A discovered crate root in the workspace.
+#[derive(Debug, Clone)]
+struct CrateSource {
+    /// Name of the crate (from directory name)
+    name: String,
+    /// Absolute path to the crate's src/ directory
+    src_dir: PathBuf,
+}
+
+/// Discover all crate source directories in the workspace.
 ///
-/// For each context, walks the `module_path` directory, extracts structs and
-/// impl methods, then cross-references them against the desired model to
-/// classify each struct as entity, value_object, service, repository, or event.
-///
-/// Returns a `DomainModel` representing what actually exists in the source code.
-pub fn scan_actual_model(workspace_root: &Path, desired: &DomainModel) -> Result<DomainModel> {
-    let mut actual = DomainModel {
-        name: desired.name.clone(),
-        description: desired.description.clone(),
-        bounded_contexts: vec![],
-        external_systems: desired.external_systems.clone(),
-        architectural_decisions: desired.architectural_decisions.clone(),
-        ownership: desired.ownership.clone(),
-        rules: desired.rules.clone(),
-        tech_stack: desired.tech_stack.clone(),
-        conventions: desired.conventions.clone(),
-    };
+/// Walks the workspace looking for `Cargo.toml` files with adjacent `src/`
+/// directories. Respects `.gitignore` (skips `target/`, hidden dirs, etc.).
+fn discover_crate_sources(workspace_root: &Path) -> Vec<CrateSource> {
+    let mut sources = Vec::new();
 
-    for desired_bc in &desired.bounded_contexts {
-        let module_dir = workspace_root.join(&desired_bc.module_path);
-        let (structs, methods) = scan_directory(&module_dir)?;
+    // Check the workspace root itself
+    let root_cargo = workspace_root.join("Cargo.toml");
+    let root_src = workspace_root.join("src");
+    if root_cargo.exists() && root_src.is_dir() {
+        let name = workspace_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "root".into());
+        sources.push(CrateSource {
+            name,
+            src_dir: root_src.clone(),
+        });
+    }
 
-        // Build a lookup of desired element names → their kind
-        let desired_entities: Vec<&str> = desired_bc.entities.iter().map(|e| e.name.as_str()).collect();
-        let desired_vos: Vec<&str> = desired_bc.value_objects.iter().map(|v| v.name.as_str()).collect();
-        let desired_services: Vec<&str> = desired_bc.services.iter().map(|s| s.name.as_str()).collect();
-        let desired_repos: Vec<&str> = desired_bc.repositories.iter().map(|r| r.name.as_str()).collect();
-        let desired_events: Vec<&str> = desired_bc.events.iter().map(|e| e.name.as_str()).collect();
-
-        let mut bc = BoundedContext {
-            name: desired_bc.name.clone(),
-            description: desired_bc.description.clone(),
-            module_path: desired_bc.module_path.clone(),
-            ownership: desired_bc.ownership.clone(),
-            aggregates: desired_bc.aggregates.clone(),
-            policies: desired_bc.policies.clone(),
-            read_models: desired_bc.read_models.clone(),
-            entities: vec![],
-            value_objects: vec![],
-            services: vec![],
-            repositories: vec![],
-            events: vec![],
-            dependencies: desired_bc.dependencies.clone(),
-        };
-
-        for discovered in &structs {
-            let name = &discovered.name;
-
-            // Methods for this struct
-            let struct_methods: Vec<Method> = methods
-                .iter()
-                .filter(|m| m.owner == *name)
-                .map(|m| Method {
-                    name: m.name.clone(),
-                    description: String::new(),
-                    parameters: m.parameters.clone(),
-                    return_type: m.return_type.clone(),
-                })
-                .collect();
-
-            // Classify by matching against the desired model
-            if desired_entities.iter().any(|e| e.eq_ignore_ascii_case(name)) {
-                // Find desired entity to copy aggregate_root / invariants
-                let desired_ent = desired_bc.entities.iter().find(|e| e.name.eq_ignore_ascii_case(name));
-                bc.entities.push(Entity {
-                    name: name.clone(),
-                    description: String::new(),
-                    aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
-                    fields: discovered.fields.clone(),
-                    methods: struct_methods,
-                    invariants: vec![], // invariants are domain rules, not extractable from AST
-                });
-            } else if desired_vos.iter().any(|v| v.eq_ignore_ascii_case(name)) {
-                bc.value_objects.push(ValueObject {
-                    name: name.clone(),
-                    description: String::new(),
-                    fields: discovered.fields.clone(),
-                    validation_rules: vec![],
-                });
-            } else if desired_services.iter().any(|s| s.eq_ignore_ascii_case(name)) {
-                let desired_svc = desired_bc.services.iter().find(|s| s.name.eq_ignore_ascii_case(name));
-                bc.services.push(Service {
-                    name: name.clone(),
-                    description: String::new(),
-                    kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
-                    methods: struct_methods,
-                    dependencies: vec![],
-                });
-            } else if desired_repos.iter().any(|r| r.eq_ignore_ascii_case(name)) {
-                let desired_repo = desired_bc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name));
-                bc.repositories.push(Repository {
-                    name: name.clone(),
-                    aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
-                    methods: struct_methods,
-                });
-            } else if desired_events.iter().any(|e| e.eq_ignore_ascii_case(name)) {
-                let desired_evt = desired_bc.events.iter().find(|e| e.name.eq_ignore_ascii_case(name));
-                bc.events.push(DomainEvent {
-                    name: name.clone(),
-                    description: String::new(),
-                    fields: discovered.fields.clone(),
-                    source: desired_evt.map_or(String::new(), |e| e.source.clone()),
+    // Walk for workspace member crates (nested Cargo.toml files)
+    for entry in ignore::WalkBuilder::new(workspace_root)
+        .max_depth(Some(4))
+        .build()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.file_name().is_some_and(|n| n == "Cargo.toml") && path != root_cargo {
+            let crate_dir = match path.parent() {
+                Some(d) => d,
+                None => continue,
+            };
+            let src = crate_dir.join("src");
+            if src.is_dir() {
+                let name = crate_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                sources.push(CrateSource {
+                    name,
+                    src_dir: src,
                 });
             }
-            // Else: struct exists in code but not in desired model — ignored
         }
+    }
 
-        actual.bounded_contexts.push(bc);
+    // Fallback: if no Cargo.toml was found but src/ exists, still scan it.
+    // Covers non-Cargo Rust projects and test scenarios.
+    if sources.is_empty() {
+        let fallback_src = workspace_root.join("src");
+        if fallback_src.is_dir() {
+            let name = workspace_root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "root".into());
+            sources.push(CrateSource {
+                name,
+                src_dir: fallback_src,
+            });
+        }
+    }
+
+    sources
+}
+
+// ─── Struct Classification ─────────────────────────────────────────────────
+
+/// Classification of a discovered struct based on naming conventions and
+/// structural heuristics. Used when no desired model is available or when a
+/// struct is not declared in the desired model.
+#[derive(Debug, Clone, PartialEq)]
+enum StructKind {
+    Entity,
+    ValueObject,
+    Service,
+    Repository,
+    Event,
+}
+
+/// Classify a struct via naming conventions first, then structural heuristics.
+///
+/// Priority order:
+/// 1. Suffix-matched naming conventions (strongest signal)
+/// 2. Structural shape (fields vs methods vs both)
+fn classify_struct(
+    name: &str,
+    fields: &[Field],
+    methods: &[DiscoveredMethod],
+) -> StructKind {
+    let upper = name.to_uppercase();
+
+    // ── Naming conventions (suffix-based) ──
+    if upper.ends_with("REPOSITORY") || upper.ends_with("REPO") {
+        return StructKind::Repository;
+    }
+    if upper.ends_with("SERVICE")
+        || upper.ends_with("HANDLER")
+        || upper.ends_with("USECASE")
+        || upper.ends_with("INTERACTOR")
+    {
+        return StructKind::Service;
+    }
+    if upper.ends_with("EVENT")
+        || upper.ends_with("CREATED")
+        || upper.ends_with("UPDATED")
+        || upper.ends_with("DELETED")
+        || upper.ends_with("CHANGED")
+        || upper.ends_with("OCCURRED")
+    {
+        return StructKind::Event;
+    }
+
+    // ── Structural heuristics ──
+    let struct_methods: Vec<_> = methods.iter().filter(|m| m.owner == name).collect();
+
+    // Fields that carry domain data (not framework wiring)
+    let has_data_fields = fields.iter().any(|f| {
+        !f.field_type.starts_with("Arc<")
+            && !f.field_type.starts_with("Box<dyn")
+            && !f.field_type.starts_with("Rc<")
+            && !f.field_type.starts_with("&")
+    });
+
+    if !has_data_fields && !struct_methods.is_empty() {
+        return StructKind::Service;
+    }
+    if has_data_fields && !struct_methods.is_empty() {
+        return StructKind::Entity;
+    }
+
+    // Has fields, no public methods → pure data → ValueObject
+    StructKind::ValueObject
+}
+
+// ─── Full Workspace Scan ───────────────────────────────────────────────────
+
+/// Scan the entire workspace bottom-up, discovering ALL public structs and
+/// methods across every crate's `src/` directory.
+///
+/// Bounded contexts are derived from the top-level module directories under
+/// each `src/`. For multi-crate workspaces every crate is scanned.
+///
+/// When a `desired` model is provided it is used as an enrichment overlay:
+///   - Structs matching a desired element inherit its classification, metadata
+///     (description, invariants, aggregate_root, etc.).
+///   - Structs NOT in the desired model are still discovered and classified
+///     via naming conventions and structural heuristics.
+///   - Desired-only metadata (aggregates, policies, read_models, external
+///     systems, architectural decisions, ownership, rules, etc.) is carried
+///     forward into the actual model.
+pub fn scan_actual_model(
+    workspace_root: &Path,
+    desired: Option<&DomainModel>,
+) -> Result<DomainModel> {
+    let project_name = desired
+        .map(|d| d.name.clone())
+        .unwrap_or_else(|| {
+            workspace_root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unnamed".into())
+        });
+
+    let mut actual = DomainModel {
+        name: project_name,
+        description: desired.map_or(String::new(), |d| d.description.clone()),
+        bounded_contexts: vec![],
+        external_systems: desired.map_or(vec![], |d| d.external_systems.clone()),
+        architectural_decisions: desired.map_or(vec![], |d| d.architectural_decisions.clone()),
+        ownership: desired.map_or(Ownership::default(), |d| d.ownership.clone()),
+        rules: desired.map_or(vec![], |d| d.rules.clone()),
+        tech_stack: desired.map_or(TechStack::default(), |d| d.tech_stack.clone()),
+        conventions: desired.map_or(Conventions::default(), |d| d.conventions.clone()),
+    };
+
+    // 1. Discover all crate source directories
+    let crate_sources = discover_crate_sources(workspace_root);
+    let multi_crate = crate_sources.len() > 1;
+
+    for crate_src in &crate_sources {
+        // 2. Discover bounded contexts from top-level module directories
+        let module_dirs: Vec<(String, PathBuf, String)> = {
+            let mut contexts = Vec::new();
+
+            if let Ok(entries) = std::fs::read_dir(&crate_src.src_dir) {
+                for entry in entries.filter_map(Result::ok) {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        let dir_name = match path.file_name() {
+                            Some(n) => n.to_string_lossy().to_string(),
+                            None => continue,
+                        };
+                        if dir_name.starts_with('.') {
+                            continue;
+                        }
+                        let module_path = path
+                            .strip_prefix(workspace_root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .to_string();
+                        let ctx_name = if multi_crate {
+                            format!("{}::{}", crate_src.name, dir_name)
+                        } else {
+                            dir_name
+                        };
+                        contexts.push((ctx_name, path, module_path));
+                    }
+                }
+            }
+
+            // If src/ has no subdirectories, treat it as a single context
+            if contexts.is_empty() {
+                let module_path = crate_src
+                    .src_dir
+                    .strip_prefix(workspace_root)
+                    .unwrap_or(&crate_src.src_dir)
+                    .to_string_lossy()
+                    .to_string();
+                contexts.push((
+                    crate_src.name.clone(),
+                    crate_src.src_dir.clone(),
+                    module_path,
+                ));
+            }
+
+            contexts
+        };
+
+        // 3. For each discovered context, scan and classify
+        for (ctx_name, scan_dir, module_path) in &module_dirs {
+            let (structs, methods) = scan_directory(scan_dir)?;
+
+            // Resolve matching desired bounded context (by name or module_path)
+            let desired_bc = desired.and_then(|d| {
+                d.bounded_contexts
+                    .iter()
+                    .find(|bc| {
+                        bc.name.eq_ignore_ascii_case(ctx_name)
+                            || bc.module_path == *module_path
+                    })
+            });
+
+            let mut bc = BoundedContext {
+                name: ctx_name.to_string(),
+                description: desired_bc.map_or(String::new(), |b| b.description.clone()),
+                module_path: module_path.clone(),
+                ownership: desired_bc.map_or(Ownership::default(), |b| b.ownership.clone()),
+                aggregates: desired_bc.map_or(vec![], |b| b.aggregates.clone()),
+                policies: desired_bc.map_or(vec![], |b| b.policies.clone()),
+                read_models: desired_bc.map_or(vec![], |b| b.read_models.clone()),
+                entities: vec![],
+                value_objects: vec![],
+                services: vec![],
+                repositories: vec![],
+                events: vec![],
+                dependencies: desired_bc.map_or(vec![], |b| b.dependencies.clone()),
+            };
+
+            for discovered in &structs {
+                let name = &discovered.name;
+
+                // Collect public methods for this struct
+                let struct_methods: Vec<Method> = methods
+                    .iter()
+                    .filter(|m| m.owner == *name)
+                    .map(|m| Method {
+                        name: m.name.clone(),
+                        description: String::new(),
+                        parameters: m.parameters.clone(),
+                        return_type: m.return_type.clone(),
+                    })
+                    .collect();
+
+                // Check if desired model provides an explicit classification
+                let desired_kind = desired_bc.and_then(|dbc| {
+                    if dbc.entities.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Entity)
+                    } else if dbc.value_objects.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::ValueObject)
+                    } else if dbc.services.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Service)
+                    } else if dbc.repositories.iter().any(|r| r.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Repository)
+                    } else if dbc.events.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Event)
+                    } else {
+                        None
+                    }
+                });
+
+                // Use desired classification when available, otherwise heuristic
+                let kind = desired_kind
+                    .unwrap_or_else(|| classify_struct(name, &discovered.fields, &methods));
+
+                match kind {
+                    StructKind::Entity => {
+                        let desired_ent = desired_bc
+                            .and_then(|dbc| dbc.entities.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        bc.entities.push(Entity {
+                            name: name.clone(),
+                            description: desired_ent.map_or(String::new(), |e| e.description.clone()),
+                            aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
+                            fields: discovered.fields.clone(),
+                            methods: struct_methods,
+                            invariants: desired_ent.map_or(vec![], |e| e.invariants.clone()),
+                        });
+                    }
+                    StructKind::ValueObject => {
+                        let desired_vo = desired_bc
+                            .and_then(|dbc| dbc.value_objects.iter().find(|v| v.name.eq_ignore_ascii_case(name)));
+                        bc.value_objects.push(ValueObject {
+                            name: name.clone(),
+                            description: desired_vo.map_or(String::new(), |v| v.description.clone()),
+                            fields: discovered.fields.clone(),
+                            validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
+                        });
+                    }
+                    StructKind::Service => {
+                        let desired_svc = desired_bc
+                            .and_then(|dbc| dbc.services.iter().find(|s| s.name.eq_ignore_ascii_case(name)));
+                        bc.services.push(Service {
+                            name: name.clone(),
+                            description: desired_svc.map_or(String::new(), |s| s.description.clone()),
+                            kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
+                            methods: struct_methods,
+                            dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
+                        });
+                    }
+                    StructKind::Repository => {
+                        let desired_repo = desired_bc
+                            .and_then(|dbc| dbc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name)));
+                        bc.repositories.push(Repository {
+                            name: name.clone(),
+                            aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
+                            methods: struct_methods,
+                        });
+                    }
+                    StructKind::Event => {
+                        let desired_evt = desired_bc
+                            .and_then(|dbc| dbc.events.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        bc.events.push(DomainEvent {
+                            name: name.clone(),
+                            description: desired_evt.map_or(String::new(), |e| e.description.clone()),
+                            fields: discovered.fields.clone(),
+                            source: desired_evt.map_or(String::new(), |e| e.source.clone()),
+                        });
+                    }
+                }
+            }
+
+            actual.bounded_contexts.push(bc);
+        }
     }
 
     Ok(actual)
@@ -520,6 +774,136 @@ mod tests {
     }
 
     #[test]
+    fn test_classify_struct_naming_conventions() {
+        // Repository suffix
+        assert_eq!(
+            classify_struct("UserRepository", &[], &[]),
+            StructKind::Repository,
+        );
+        assert_eq!(
+            classify_struct("OrderRepo", &[], &[]),
+            StructKind::Repository,
+        );
+
+        // Service suffix
+        assert_eq!(
+            classify_struct("PaymentService", &[], &[]),
+            StructKind::Service,
+        );
+        assert_eq!(
+            classify_struct("AuthHandler", &[], &[]),
+            StructKind::Service,
+        );
+
+        // Event suffix
+        assert_eq!(
+            classify_struct("OrderCreated", &[], &[]),
+            StructKind::Event,
+        );
+        assert_eq!(
+            classify_struct("UserDeletedEvent", &[], &[]),
+            StructKind::Event,
+        );
+    }
+
+    #[test]
+    fn test_classify_struct_structural_heuristics() {
+        let data_fields = vec![Field {
+            name: "name".into(),
+            field_type: "String".into(),
+            required: true,
+            description: String::new(),
+        }];
+        let dep_fields = vec![Field {
+            name: "store".into(),
+            field_type: "Arc<Store>".into(),
+            required: true,
+            description: String::new(),
+        }];
+        let methods = vec![DiscoveredMethod {
+            owner: "Foo".into(),
+            name: "do_thing".into(),
+            parameters: vec![],
+            return_type: String::new(),
+            file_path: String::new(),
+        }];
+
+        // Data fields + methods → Entity
+        assert_eq!(
+            classify_struct("Foo", &data_fields, &methods),
+            StructKind::Entity,
+        );
+
+        // Data fields, no methods → ValueObject
+        assert_eq!(
+            classify_struct("Foo", &data_fields, &[]),
+            StructKind::ValueObject,
+        );
+
+        // Only dependency fields + methods → Service
+        assert_eq!(
+            classify_struct("Foo", &dep_fields, &methods),
+            StructKind::Service,
+        );
+    }
+
+    #[test]
+    fn test_scan_actual_model_discovers_without_desired() {
+        use std::env::temp_dir;
+        use std::fs;
+
+        let tmp = temp_dir().join(format!("dendrites_nodesc_test_{}", std::process::id()));
+        let src = tmp.join("src").join("billing");
+        fs::create_dir_all(&src).unwrap();
+
+        fs::write(
+            src.join("types.rs"),
+            r#"
+pub struct Invoice {
+    pub id: u64,
+    pub total: f64,
+}
+
+pub struct Currency {
+    pub code: String,
+}
+
+pub struct InvoiceRepository {}
+
+impl Invoice {
+    pub fn apply_discount(&self, pct: f64) -> f64 { todo!() }
+}
+
+impl InvoiceRepository {
+    pub fn find_by_id(&self, id: u64) -> Option<Invoice> { todo!() }
+}
+"#,
+        )
+        .unwrap();
+
+        // No desired model at all — pure heuristic discovery
+        let actual = scan_actual_model(&tmp, None).unwrap();
+
+        assert_eq!(actual.bounded_contexts.len(), 1);
+        let bc = &actual.bounded_contexts[0];
+        assert_eq!(bc.name, "billing");
+
+        // Invoice: has data fields + methods → Entity (heuristic)
+        assert!(bc.entities.iter().any(|e| e.name == "Invoice"));
+        let invoice = bc.entities.iter().find(|e| e.name == "Invoice").unwrap();
+        assert_eq!(invoice.fields.len(), 2);
+        assert_eq!(invoice.methods.len(), 1);
+
+        // Currency: has data fields, no methods → ValueObject (heuristic)
+        assert!(bc.value_objects.iter().any(|v| v.name == "Currency"));
+
+        // InvoiceRepository: naming convention → Repository
+        assert!(bc.repositories.iter().any(|r| r.name == "InvoiceRepository"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_scan_actual_model_classifies_by_desired() {
         use std::env::temp_dir;
         use std::fs;
@@ -551,7 +935,7 @@ impl User {
             name: "Test".into(),
             description: "".into(),
             bounded_contexts: vec![BoundedContext {
-                name: "Domain".into(),
+                name: "domain".into(),
                 description: "".into(),
                 module_path: "src/domain".into(),
                 ownership: Ownership::default(),
@@ -585,7 +969,7 @@ impl User {
             conventions: Conventions::default(),
         };
 
-        let actual = scan_actual_model(&tmp, &desired).unwrap();
+        let actual = scan_actual_model(&tmp, Some(&desired)).unwrap();
         assert_eq!(actual.bounded_contexts.len(), 1);
         let bc = &actual.bounded_contexts[0];
 
@@ -595,7 +979,9 @@ impl User {
         assert!(bc.entities[0].aggregate_root); // inherited from desired
         assert_eq!(bc.entities[0].fields.len(), 2); // name, email from AST
         assert_eq!(bc.entities[0].methods.len(), 1); // change_email
-        assert!(bc.entities[0].invariants.is_empty()); // not extractable from AST
+        // Invariants carried from desired model enrichment
+        assert_eq!(bc.entities[0].invariants.len(), 1);
+        assert_eq!(bc.entities[0].invariants[0], "Email must be unique");
 
         // Email classified as value_object (from desired)
         assert_eq!(bc.value_objects.len(), 1);

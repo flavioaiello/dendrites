@@ -4,7 +4,7 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::domain::model::DomainModel;
 use crate::mcp::{protocol::*, prompts, resources, tools, write_tools};
-use crate::store::Store;
+use crate::store::{CrateRegistry, Store};
 
 /// Load the desired model from store, falling back to an empty model.
 fn load_model(store: &Store, workspace_path: &str) -> DomainModel {
@@ -20,7 +20,14 @@ const WRITE_TOOLS: &[&str] = &[
 
 /// Run the MCP server over stdio (stdin/stdout), the standard transport for
 /// VS Code / GitHub Copilot MCP integration.
-pub async fn run(workspace_path: String, store: std::sync::Arc<Store>) -> Result<()> {
+///
+/// The registry holds per-crate stores. The primary crate's store and workspace
+/// key are extracted and threaded through the request handling unchanged.
+pub async fn run(registry: std::sync::Arc<CrateRegistry>) -> Result<()> {
+    let primary = registry.primary();
+    let workspace_path = primary.workspace_key();
+    let store = std::sync::Arc::clone(&primary.store);
+
     let stdin = BufReader::new(io::stdin());
     let mut stdout = io::stdout();
     let mut lines = stdin.lines();

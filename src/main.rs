@@ -36,8 +36,12 @@ enum Commands {
         state: String,
     },
 
-    /// List all projects stored in the local database
-    List,
+    /// List all crates and their model status in a workspace
+    List {
+        /// Workspace path (defaults to current directory)
+        #[arg(short, long)]
+        workspace: Option<String>,
+    },
 
     /// Check live workspace semantics without prompting LLM
     Check {
@@ -77,14 +81,17 @@ async fn main() -> Result<()> {
         // Default: serve from cwd
         None => {
             let workspace = resolve_workspace(None);
-            let store = std::sync::Arc::new(store::Store::open_default()?);
-            tracing::info!("Dendrites Server starting for workspace: {}", workspace);
+            let registry = std::sync::Arc::new(
+                store::CrateRegistry::open(std::path::Path::new(&workspace))?
+            );
+            tracing::info!(
+                "Dendrites Server starting for workspace: {} ({} crate(s))",
+                workspace,
+                registry.crates().len()
+            );
 
-            let workspace_path = std::path::PathBuf::from(&workspace);
-            let watcher_store = std::sync::Arc::clone(&store);
             let watcher = server::watcher::ActualStateWatcher::new(
-                workspace_path,
-                watcher_store,
+                std::sync::Arc::clone(&registry),
             );
 
             tokio::spawn(async move {
@@ -93,19 +100,22 @@ async fn main() -> Result<()> {
                 }
             });
 
-            server::stdio::run(workspace, store).await?;
+            server::stdio::run(registry).await?;
         }
 
         Some(Commands::Serve { workspace }) => {
             let workspace = resolve_workspace(workspace);
-            let store = std::sync::Arc::new(store::Store::open_default()?);
-            tracing::info!("Dendrites Server starting for workspace: {}", workspace);
+            let registry = std::sync::Arc::new(
+                store::CrateRegistry::open(std::path::Path::new(&workspace))?
+            );
+            tracing::info!(
+                "Dendrites Server starting for workspace: {} ({} crate(s))",
+                workspace,
+                registry.crates().len()
+            );
 
-            let workspace_path = std::path::PathBuf::from(&workspace);
-            let watcher_store = std::sync::Arc::clone(&store);
             let watcher = server::watcher::ActualStateWatcher::new(
-                workspace_path,
-                watcher_store,
+                std::sync::Arc::clone(&registry),
             );
 
             // Spawn the background watcher
@@ -115,77 +125,81 @@ async fn main() -> Result<()> {
                 }
             });
 
-            server::stdio::run(workspace, store).await?;
+            server::stdio::run(registry).await?;
         }
 
         Some(Commands::Export { file, workspace, state }) => {
-            let store = store::Store::open_default()?;
-            store.export_to_file(&workspace, &file, &state)?;
-            eprintln!("Exported {} model for workspace '{}' to: {}", state, workspace, file);
+            let registry = store::CrateRegistry::open(std::path::Path::new(&workspace))?;
+            let entry = registry.primary();
+            let ws = entry.workspace_key();
+            entry.store.export_to_file(&ws, &file, &state)?;
+            eprintln!("Exported {} model for crate '{}' to: {}", state, entry.name, file);
         }
 
-        Some(Commands::List) => {
-            let store = store::Store::open_default()?;
-            let projects = store.list()?;
-            if projects.is_empty() {
-                eprintln!("No projects in store.");
-            } else {
-                eprintln!("{:<50} {:<25} UPDATED", "WORKSPACE", "PROJECT");
-                eprintln!("{}", "-".repeat(95));
-                for p in &projects {
-                    eprintln!(
-                        "{:<50} {:<25} {}",
-                        p.workspace_path, p.project_name, p.updated_at
-                    );
-                }
-                eprintln!("\n{} project(s) total", projects.len());
+        Some(Commands::List { workspace }) => {
+            let workspace = resolve_workspace(workspace);
+            let registry = store::CrateRegistry::open(std::path::Path::new(&workspace))?;
+            eprintln!("{:<25} {:<55} STATUS", "CRATE", "PATH");
+            eprintln!("{}", "-".repeat(90));
+            for entry in registry.crates() {
+                let ws = entry.workspace_key();
+                let has_model = entry.store.load_desired(&ws)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| !m.bounded_contexts.is_empty());
+                let status = if has_model { "has model" } else { "no model" };
+                eprintln!("{:<25} {:<55} {}", entry.name, ws, status);
             }
+            eprintln!("\n{} crate(s) total", registry.crates().len());
         }
 
         Some(Commands::Check { workspace }) => {
-            let store = store::Store::open_default()?;
-            let live_deps = domain::analyze::scan_workspace(std::path::Path::new(&workspace))?;
-            eprintln!("Extracted {} live imports across the workspace.", live_deps.len());
-            
-            // Map live imports to the ephemeral CozoDB logic
-            match store.check_live_dependencies(&workspace, &live_deps) {
-                Ok(violations) => {
-                    if violations.is_empty() {
-                        eprintln!("No architectural layer violations found during continuous check.");
-                    } else {
-                        eprintln!("Violations found: {:?}", violations);
+            let registry = store::CrateRegistry::open(std::path::Path::new(&workspace))?;
+            for entry in registry.crates() {
+                let ws = entry.workspace_key();
+                let live_deps = domain::analyze::scan_workspace(&entry.root)?;
+                eprintln!("Crate '{}': {} live imports.", entry.name, live_deps.len());
+                match entry.store.check_live_dependencies(&ws, &live_deps) {
+                    Ok(violations) => {
+                        if violations.is_empty() {
+                            eprintln!("  No architectural layer violations found.");
+                        } else {
+                            eprintln!("  Violations found: {:?}", violations);
+                        }
                     }
+                    Err(e) => eprintln!("  Failed to check: {}", e),
                 }
-                Err(e) => eprintln!("Failed to test live dependencies: {}", e),
             }
         }
 
         Some(Commands::Scan { workspace }) => {
-            let store = store::Store::open_default()?;
-            let desired = store.load_desired(&workspace)?
-                .unwrap_or_else(|| domain::model::DomainModel::empty(&workspace));
+            let registry = store::CrateRegistry::open(std::path::Path::new(&workspace))?;
+            for entry in registry.crates() {
+                let ws = entry.workspace_key();
+                let desired = entry.store.load_desired(&ws)?;
+                let actual = domain::analyze::scan_actual_model(&entry.root, desired.as_ref())?;
 
-            if desired.bounded_contexts.is_empty() {
-                eprintln!("No bounded contexts in the desired model. Seed the model first with:");
-                eprintln!("  dendrites import <file> --workspace {}", workspace);
-                eprintln!("  or via the MCP set_model tool.");
-                std::process::exit(1);
+                let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
+                let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
+                let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
+                let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
+                let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
+
+                entry.store.save_actual(&ws, &actual)?;
+
+                // Auto-bootstrap: seed desired from actual on first scan
+                if entry.store.load_desired(&ws)?.is_none() {
+                    entry.store.reset(&ws)?;
+                    eprintln!("  Bootstrapped desired model from actual for crate '{}'", entry.name);
+                }
+
+                eprintln!(
+                    "Crate '{}': {} contexts → {} entities, {} VOs, {} services, {} repos, {} events",
+                    entry.name, actual.bounded_contexts.len(),
+                    entity_count, vo_count, svc_count, repo_count, event_count
+                );
             }
-
-            let workspace_root = std::path::Path::new(&workspace);
-            let actual = domain::analyze::scan_actual_model(workspace_root, &desired)?;
-
-            let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
-            let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
-            let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
-            let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
-            let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
-
-            store.save_actual(&workspace, &actual)?;
-
-            eprintln!("Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events",
-                actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count);
-            eprintln!("Actual model saved. Run `dendrites export <file> -w {}` or use get_model to see diff.", workspace);
+            eprintln!("Actual model saved for {} crate(s).", registry.crates().len());
         }
     }
 

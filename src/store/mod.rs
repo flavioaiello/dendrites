@@ -1,3 +1,169 @@
 pub mod cozo;
 
 pub use cozo::Store;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use anyhow::{Context, Result};
+
+// ─── Crate Entry ───────────────────────────────────────────────────────────
+
+/// A discovered crate within a workspace, with its own CozoDB store.
+///
+/// Each crate gets an independent database at `<crate_root>/.dendrites/store.db`.
+/// The `workspace_key()` value is the canonical crate root path, used as the
+/// `workspace` column value in all CozoDB relations.
+pub struct CrateEntry {
+    /// Crate name (from directory name)
+    pub name: String,
+    /// Absolute path to the crate root (contains Cargo.toml)
+    pub root: PathBuf,
+    /// Per-crate CozoDB store
+    pub store: Arc<Store>,
+}
+
+impl CrateEntry {
+    /// The canonical workspace key for this crate's store operations.
+    pub fn workspace_key(&self) -> String {
+        cozo::canonicalize_path(&self.root.to_string_lossy())
+    }
+}
+
+// ─── Crate Registry ────────────────────────────────────────────────────────
+
+/// Registry of per-crate CozoDB stores for a workspace.
+///
+/// Replaces the old global `~/.dendrites/dendrites.db` with one database per
+/// crate at `<crate_root>/.dendrites/store.db`. This provides:
+///
+/// - **Multi-project isolation**: different VS Code projects → different crate
+///   roots → independent databases.
+/// - **Multi-crate support**: a workspace with multiple crates gets one store
+///   per crate, each tracking its own domain model independently.
+pub struct CrateRegistry {
+    workspace_root: PathBuf,
+    crates: Vec<CrateEntry>,
+}
+
+impl CrateRegistry {
+    /// Discover crates in the workspace and open a Store for each.
+    pub fn open(workspace_root: &Path) -> Result<Self> {
+        let workspace_root = workspace_root.canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
+
+        let crate_roots = discover_crate_roots(&workspace_root);
+
+        anyhow::ensure!(
+            !crate_roots.is_empty(),
+            "No crates found in workspace: {}",
+            workspace_root.display()
+        );
+
+        let mut crates = Vec::with_capacity(crate_roots.len());
+        for (name, root) in crate_roots {
+            let db_path = root.join(".dendrites").join("store.db");
+            let store = Arc::new(
+                Store::open(&db_path).with_context(|| {
+                    format!(
+                        "Failed to open store for crate '{}' at {}",
+                        name,
+                        db_path.display()
+                    )
+                })?,
+            );
+            crates.push(CrateEntry { name, root, store });
+        }
+
+        Ok(Self {
+            workspace_root,
+            crates,
+        })
+    }
+
+    /// The workspace root path.
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    /// All discovered crates.
+    pub fn crates(&self) -> &[CrateEntry] {
+        &self.crates
+    }
+
+    /// The primary crate (whose root matches the workspace root, or the first).
+    pub fn primary(&self) -> &CrateEntry {
+        self.crates
+            .iter()
+            .find(|c| c.root == self.workspace_root)
+            .unwrap_or(&self.crates[0])
+    }
+
+    /// Find the crate that owns a given file path (deepest matching root wins).
+    pub fn for_path(&self, path: &Path) -> Option<&CrateEntry> {
+        self.crates
+            .iter()
+            .filter(|c| path.starts_with(&c.root))
+            .max_by_key(|c| c.root.components().count())
+    }
+
+    /// Find a crate by name.
+    pub fn by_name(&self, name: &str) -> Option<&CrateEntry> {
+        self.crates.iter().find(|c| c.name == name)
+    }
+}
+
+// ─── Crate Discovery ──────────────────────────────────────────────────────
+
+/// Discover crate roots in a workspace.
+///
+/// Returns `(name, root_path)` for each crate that has a `Cargo.toml` with an
+/// adjacent `src/` directory. Respects `.gitignore` via the `ignore` crate.
+fn discover_crate_roots(workspace_root: &Path) -> Vec<(String, PathBuf)> {
+    let mut roots = Vec::new();
+
+    let root_cargo = workspace_root.join("Cargo.toml");
+    let root_src = workspace_root.join("src");
+
+    // Check the workspace root itself
+    if root_cargo.exists() && root_src.is_dir() {
+        let name = workspace_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "root".into());
+        roots.push((name, workspace_root.to_path_buf()));
+    }
+
+    // Walk for workspace member crates (nested Cargo.toml files)
+    for entry in ignore::WalkBuilder::new(workspace_root)
+        .max_depth(Some(4))
+        .build()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.file_name().is_some_and(|n| n == "Cargo.toml") && path != root_cargo {
+            let crate_dir = match path.parent() {
+                Some(d) => d,
+                None => continue,
+            };
+            let src = crate_dir.join("src");
+            if src.is_dir() {
+                let name = crate_dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "unknown".into());
+                roots.push((name, crate_dir.to_path_buf()));
+            }
+        }
+    }
+
+    // Fallback: if no Cargo.toml was found but src/ exists, still include it
+    if roots.is_empty() && root_src.is_dir() {
+        let name = workspace_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "root".into());
+        roots.push((name, workspace_root.to_path_buf()));
+    }
+
+    roots
+}
