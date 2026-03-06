@@ -1,6 +1,6 @@
-pub mod diff;
 pub mod model;
-pub mod registry;
+pub mod analyze;
+
 
 /// Convert PascalCase / camelCase to snake_case.
 pub fn to_snake(s: &str) -> String {

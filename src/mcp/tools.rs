@@ -1,7 +1,5 @@
 use serde_json::{json, Value};
 
-use crate::domain::model::DomainModel;
-use crate::domain::registry::DomainRegistry;
 use crate::mcp::protocol::*;
 use crate::store::Store;
 
@@ -25,11 +23,12 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             name: "scrutinize".into(),
             description: "Run Datalog-based analysis queries over the domain model knowledge graph. \
                           Supports predefined analyses (transitive_deps, circular_deps, \
-                          layer_violations, impact_analysis, aggregate_quality, dependency_graph) \
-                          and arbitrary Datalog queries. The domain model is decomposed into \
-                          relations: context, context_dep, entity, entity_field, entity_method, \
-                          method_param, invariant, service, service_dep, service_method, event, \
-                          event_field, value_object, repository, arch_rule."
+                          layer_violations, impact_analysis, aggregate_quality, dependency_graph, \
+                          field_usage, method_search, shared_fields) \
+                          and arbitrary Datalog queries. All relations have a `state` column \
+                          ('desired' | 'actual') for set-differencing. Relations: \
+                          context, context_dep, entity, service, service_dep, event, \
+                          value_object, repository, invariant, field, method, method_param, vo_rule."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -43,6 +42,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                             "impact_analysis",
                             "aggregate_quality",
                             "dependency_graph",
+                            "field_usage",
+                            "method_search",
+                            "shared_fields",
                             "datalog"
                         ],
                         "description": "Type of analysis to run"
@@ -54,6 +56,14 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "entity": {
                         "type": "string",
                         "description": "Entity name (required for impact_analysis)"
+                    },
+                    "field_type": {
+                        "type": "string",
+                        "description": "Field type to search for (required for field_usage)"
+                    },
+                    "method_name": {
+                        "type": "string",
+                        "description": "Method name to search for (required for method_search)"
                     },
                     "query": {
                         "type": "string",
@@ -70,50 +80,41 @@ pub fn list_tools() -> Vec<ToolDefinition> {
 
 /// Dispatches a tool call and returns the result.
 pub fn call_tool(
-    model: &DomainModel,
     store: &Store,
     workspace_path: &str,
     name: &str,
     args: &Value,
 ) -> ToolCallResult {
-    let registry = DomainRegistry::new(model);
-
     match name {
         "get_model" => {
-            let desired_summary = registry.architecture_summary();
+            let canonical = crate::store::cozo::canonicalize_path(workspace_path);
 
-            // Load actual model and produce dual-model overview
-            let actual_summary = match store.load_actual(workspace_path) {
-                Ok(Some(actual)) => {
-                    let actual_reg = DomainRegistry::new(&actual);
-                    Some(actual_reg.architecture_summary())
-                }
-                Ok(None) => None,
-                Err(_) => None,
-            };
+            // Build overview from Datalog relations — no in-memory DomainRegistry
+            let desired_overview = build_model_overview(store, &canonical, "desired");
+            let actual_overview = build_model_overview(store, &canonical, "actual");
 
-            let (status, pending_count) = match &actual_summary {
-                Some(actual_json) if actual_json == &desired_summary => {
+            let has_actual = actual_overview.get("bounded_contexts")
+                .and_then(|v| v.as_array())
+                .is_some_and(|a| !a.is_empty());
+
+            // Use pure Datalog diff for sync check
+            let (status, pending_count) = if has_actual {
+                let changes = store.diff_graph(workspace_path).ok()
+                    .and_then(|v| v.get("pending_changes").cloned())
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default();
+                if changes.is_empty() {
                     ("in_sync", 0)
-                }
-                Some(_) => {
-                    // Count changes via diff
-                    let actual_model = store.load_actual(workspace_path)
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| DomainModel::empty(workspace_path));
-                    let changes = crate::domain::diff::diff_models(&actual_model, model);
+                } else {
                     ("pending_changes", changes.len())
                 }
-                None => ("no_actual", 0),
+            } else {
+                ("no_actual", 0)
             };
 
             let overview = json!({
-                "desired": serde_json::from_str::<Value>(&desired_summary).unwrap_or(json!({})),
-                "actual": actual_summary
-                    .as_ref()
-                    .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                    .unwrap_or(json!(null)),
+                "desired": desired_overview,
+                "actual": if has_actual { actual_overview } else { json!(null) },
                 "status": status,
                 "pending_change_count": pending_count,
             });
@@ -236,7 +237,99 @@ pub fn call_tool(
                         Err(e) => error_result(format!("Datalog query failed: {}", e)),
                     }
                 }
-                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, datalog", analysis)),
+                "field_usage" => {
+                    let field_type = match args["field_type"].as_str() {
+                        Some(t) => t,
+                        None => return error_result("'field_type' parameter is required for field_usage".into()),
+                    };
+                    match store.run_datalog(
+                        &format!(
+                            "?[ctx, owner_kind, owner, field_name] := \
+                                *field{{workspace: $ws, context: ctx, owner_kind, owner, \
+                                       name: field_name, field_type: '{}', state: 'desired'}}",
+                            field_type.replace('\''  , "''")
+                        ),
+                        &canonical,
+                    ) {
+                        Ok(rows) => {
+                            let items: Vec<_> = rows.iter().map(|r| json!({
+                                "context": r[0], "owner_kind": r[1],
+                                "owner": r[2], "field": r[3],
+                            })).collect();
+                            text_result(json!({
+                                "analysis": "field_usage",
+                                "field_type": field_type,
+                                "usages": items,
+                                "count": items.len(),
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("Field usage query failed: {e}")),
+                    }
+                }
+                "method_search" => {
+                    let method_name = match args["method_name"].as_str() {
+                        Some(n) => n,
+                        None => return error_result("'method_name' parameter is required for method_search".into()),
+                    };
+                    match store.run_datalog(
+                        &format!(
+                            "?[ctx, owner_kind, owner, return_type] := \
+                                *method{{workspace: $ws, context: ctx, owner_kind, owner, \
+                                        name: '{}', state: 'desired', return_type}}",
+                            method_name.replace('\'', "''")
+                        ),
+                        &canonical,
+                    ) {
+                        Ok(rows) => {
+                            let items: Vec<_> = rows.iter().map(|r| json!({
+                                "context": r[0], "owner_kind": r[1],
+                                "owner": r[2], "return_type": r[3],
+                            })).collect();
+                            text_result(json!({
+                                "analysis": "method_search",
+                                "method_name": method_name,
+                                "matches": items,
+                                "count": items.len(),
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("Method search query failed: {e}")),
+                    }
+                }
+                "shared_fields" => {
+                    // Find field names shared between entities and events
+                    // (potential event-sourcing alignment opportunities)
+                    match store.run_datalog(
+                        "entity_field[ctx, owner, name, ft] := \
+                            *field{workspace: $ws, context: ctx, owner_kind: 'entity', \
+                                   owner, name, field_type: ft, state: 'desired'} \
+                         event_field[ctx, owner, name, ft] := \
+                            *field{workspace: $ws, context: ctx, owner_kind: 'event', \
+                                   owner, name, field_type: ft, state: 'desired'} \
+                         ?[ctx, entity, event, field_name, field_type] := \
+                            entity_field[ctx, entity, field_name, field_type], \
+                            event_field[ctx, event, field_name, field_type]",
+                        &canonical,
+                    ) {
+                        Ok(rows) => {
+                            let items: Vec<_> = rows.iter().map(|r| json!({
+                                "context": r[0], "entity": r[1],
+                                "event": r[2], "field": r[3], "type": r[4],
+                            })).collect();
+                            text_result(json!({
+                                "analysis": "shared_fields",
+                                "shared": items,
+                                "count": items.len(),
+                                "insight": if items.is_empty() {
+                                    "No shared fields between entities and events."
+                                } else {
+                                    "Shared fields suggest event-sourcing alignment. Events carry entity state."
+                                }
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("Shared fields query failed: {e}")),
+                    }
+                }
+                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields, datalog", analysis)),
             }
         }
 
@@ -256,6 +349,217 @@ fn error_result(msg: String) -> ToolCallResult {
         content: vec![ContentBlock::Text { text: msg }],
         is_error: Some(true),
     }
+}
+
+/// Build a model overview purely from Datalog relations — replaces DomainRegistry.
+pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Value {
+    // Load project metadata
+    let project = store.run_datalog(
+        "?[name, description, tech_stack_json, conventions_json, rules_json] := \
+            *project{workspace: $ws, name, description, tech_stack_json, conventions_json, rules_json}",
+        workspace,
+    ).unwrap_or_default();
+
+    let (proj_name, proj_desc, tech, conventions, rules) = if let Some(row) = project.first() {
+        (
+            row[0].clone(),
+            row[1].clone(),
+            serde_json::from_str::<Value>(&row[2]).unwrap_or(json!({})),
+            serde_json::from_str::<Value>(&row[3]).unwrap_or(json!({})),
+            serde_json::from_str::<Value>(&row[4]).unwrap_or(json!([])),
+        )
+    } else {
+        return json!({});
+    };
+
+    // Query all contexts
+    let contexts = store.run_datalog(
+        &format!("?[name, description, module_path] := \
+            *context{{workspace: $ws, name, description, module_path, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let context_deps = store.run_datalog(
+        &format!("?[from_ctx, to_ctx] := \
+            *context_dep{{workspace: $ws, from_ctx, to_ctx, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let entities = store.run_datalog(
+        &format!("?[ctx, name, description, aggregate_root] := \
+            *entity{{workspace: $ws, context: ctx, name, description, aggregate_root, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let services = store.run_datalog(
+        &format!("?[ctx, name, description, kind] := \
+            *service{{workspace: $ws, context: ctx, name, description, kind, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let events = store.run_datalog(
+        &format!("?[ctx, name, description, source] := \
+            *event{{workspace: $ws, context: ctx, name, description, source, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let value_objects = store.run_datalog(
+        &format!("?[ctx, name, description] := \
+            *value_object{{workspace: $ws, context: ctx, name, description, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let repositories = store.run_datalog(
+        &format!("?[ctx, name, aggregate] := \
+            *repository{{workspace: $ws, context: ctx, name, aggregate, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let fields = store.run_datalog(
+        &format!("?[ctx, owner_kind, owner, name, field_type, required] := \
+            *field{{workspace: $ws, context: ctx, owner_kind, owner, name, field_type, required, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let methods = store.run_datalog(
+        &format!("?[ctx, owner_kind, owner, name, description, return_type] := \
+            *method{{workspace: $ws, context: ctx, owner_kind, owner, name, description, return_type, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let method_params = store.run_datalog(
+        &format!("?[ctx, owner_kind, owner, method, name, param_type, required] := \
+            *method_param{{workspace: $ws, context: ctx, owner_kind, owner, method, name, param_type, required, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let invariants = store.run_datalog(
+        &format!("?[ctx, entity, text] := \
+            *invariant{{workspace: $ws, context: ctx, entity, text, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    let vo_rules = store.run_datalog(
+        &format!("?[ctx, vo, text] := \
+            *vo_rule{{workspace: $ws, context: ctx, value_object: vo, text, state: '{state}'}}"),
+        workspace,
+    ).unwrap_or_default();
+
+    // Assemble per-context JSON
+    let bc_json: Vec<Value> = contexts.iter().map(|ctx_row| {
+        let ctx_name = &ctx_row[0];
+
+        let deps: Vec<&str> = context_deps.iter()
+            .filter(|r| r[0] == *ctx_name)
+            .map(|r| r[1].as_str())
+            .collect();
+
+        let ctx_entities: Vec<Value> = entities.iter()
+            .filter(|r| r[0] == *ctx_name)
+            .map(|e| {
+                let ent_name = &e[1];
+                let ent_fields: Vec<Value> = fields.iter()
+                    .filter(|f| f[0] == *ctx_name && f[1] == "entity" && f[2] == *ent_name)
+                    .map(|f| json!({"name": f[3], "type": f[4], "required": f[5] == "true"}))
+                    .collect();
+                let ent_methods: Vec<Value> = methods.iter()
+                    .filter(|m| m[0] == *ctx_name && m[1] == "entity" && m[2] == *ent_name)
+                    .map(|m| {
+                        let params: Vec<Value> = method_params.iter()
+                            .filter(|p| p[0] == *ctx_name && p[1] == "entity" && p[2] == *ent_name && p[3] == m[3])
+                            .map(|p| json!({"name": p[4], "type": p[5], "required": p[6] == "true"}))
+                            .collect();
+                        json!({"name": m[3], "description": m[4], "return_type": m[5], "parameters": params})
+                    })
+                    .collect();
+                let ent_invariants: Vec<&str> = invariants.iter()
+                    .filter(|i| i[0] == *ctx_name && i[1] == *ent_name)
+                    .map(|i| i[2].as_str())
+                    .collect();
+                json!({
+                    "name": ent_name, "description": e[2],
+                    "aggregate_root": e[3] == "true",
+                    "fields": ent_fields, "methods": ent_methods,
+                    "invariants": ent_invariants,
+                })
+            })
+            .collect();
+
+        let ctx_services: Vec<Value> = services.iter()
+            .filter(|r| r[0] == *ctx_name)
+            .map(|s| {
+                let svc_methods: Vec<Value> = methods.iter()
+                    .filter(|m| m[0] == *ctx_name && m[1] == "service" && m[2] == s[1])
+                    .map(|m| {
+                        let params: Vec<Value> = method_params.iter()
+                            .filter(|p| p[0] == *ctx_name && p[1] == "service" && p[2] == s[1] && p[3] == m[3])
+                            .map(|p| json!({"name": p[4], "type": p[5], "required": p[6] == "true"}))
+                            .collect();
+                        json!({"name": m[3], "description": m[4], "return_type": m[5], "parameters": params})
+                    })
+                    .collect();
+                json!({"name": s[1], "description": s[2], "kind": s[3], "methods": svc_methods})
+            })
+            .collect();
+
+        let ctx_events: Vec<Value> = events.iter()
+            .filter(|r| r[0] == *ctx_name)
+            .map(|ev| {
+                let evt_fields: Vec<Value> = fields.iter()
+                    .filter(|f| f[0] == *ctx_name && f[1] == "event" && f[2] == ev[1])
+                    .map(|f| json!({"name": f[3], "type": f[4], "required": f[5] == "true"}))
+                    .collect();
+                json!({"name": ev[1], "description": ev[2], "source": ev[3], "fields": evt_fields})
+            })
+            .collect();
+
+        let ctx_vos: Vec<Value> = value_objects.iter()
+            .filter(|r| r[0] == *ctx_name)
+            .map(|vo| {
+                let vo_fields: Vec<Value> = fields.iter()
+                    .filter(|f| f[0] == *ctx_name && f[1] == "value_object" && f[2] == vo[1])
+                    .map(|f| json!({"name": f[3], "type": f[4], "required": f[5] == "true"}))
+                    .collect();
+                let rules: Vec<&str> = vo_rules.iter()
+                    .filter(|r| r[0] == *ctx_name && r[1] == vo[1])
+                    .map(|r| r[2].as_str())
+                    .collect();
+                json!({"name": vo[1], "description": vo[2], "fields": vo_fields, "validation_rules": rules})
+            })
+            .collect();
+
+        let ctx_repos: Vec<Value> = repositories.iter()
+            .filter(|r| r[0] == *ctx_name)
+            .map(|repo| {
+                let repo_methods: Vec<Value> = methods.iter()
+                    .filter(|m| m[0] == *ctx_name && m[1] == "repository" && m[2] == repo[1])
+                    .map(|m| {
+                        let params: Vec<Value> = method_params.iter()
+                            .filter(|p| p[0] == *ctx_name && p[1] == "repository" && p[2] == repo[1] && p[3] == m[3])
+                            .map(|p| json!({"name": p[4], "type": p[5], "required": p[6] == "true"}))
+                            .collect();
+                        json!({"name": m[3], "description": m[4], "return_type": m[5], "parameters": params})
+                    })
+                    .collect();
+                json!({"name": repo[1], "aggregate": repo[2], "methods": repo_methods})
+            })
+            .collect();
+
+        json!({
+            "name": ctx_name, "description": ctx_row[1], "module": ctx_row[2],
+            "entities": ctx_entities, "services": ctx_services, "events": ctx_events,
+            "value_objects": ctx_vos, "repositories": ctx_repos, "depends_on": deps,
+        })
+    }).collect();
+
+    json!({
+        "project": proj_name,
+        "description": proj_desc,
+        "tech": tech,
+        "bounded_contexts": bc_json,
+        "rules": rules,
+        "conventions": conventions,
+    })
 }
 
 #[cfg(test)]
@@ -338,9 +642,8 @@ mod tests {
 
     #[test]
     fn test_unknown_tool() {
-        let model = test_model();
         let store = test_store();
-        let result = call_tool(&model, &store, "/tmp/test-tools", "nonexistent_tool", &json!({}));
+        let result = call_tool(&store, "/tmp/test-tools", "nonexistent_tool", &json!({}));
         assert_eq!(result.is_error, Some(true));
     }
 
@@ -358,7 +661,7 @@ mod tests {
         // Save desired + accept to create actual
         store.save_desired(ws, &model).unwrap();
         store.accept(ws).unwrap();
-        let result = call_tool(&model, &store, ws, "get_model", &json!({}));
+        let result = call_tool(&store, ws, "get_model", &json!({}));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
@@ -371,9 +674,10 @@ mod tests {
 
     #[test]
     fn test_overview_no_actual_shows_status() {
-        let model = test_model();
         let store = test_store();
-        let result = call_tool(&model, &store, "/tmp/test-no-actual", "get_model", &json!({}));
+        let ws = "/tmp/test-no-actual";
+        store.save_desired(ws, &test_model()).unwrap();
+        let result = call_tool(&store, ws, "get_model", &json!({}));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
@@ -394,7 +698,7 @@ mod tests {
         }
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&model, &store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "scrutinize", &json!({
             "analysis": "circular_deps"
         }));
         let text = match &result.content[0] {
@@ -426,7 +730,7 @@ mod tests {
         });
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&model, &store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "scrutinize", &json!({
             "analysis": "transitive_deps",
             "context": "Notifications"
         }));
@@ -448,7 +752,7 @@ mod tests {
         let model = test_model();
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&model, &store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "scrutinize", &json!({
             "analysis": "datalog",
             "query": "?[name] := *entity{workspace: $ws, name}"
         }));
@@ -467,7 +771,7 @@ mod tests {
         let model = test_model();
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&model, &store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "scrutinize", &json!({
             "analysis": "dependency_graph"
         }));
         let text = match &result.content[0] {
@@ -481,9 +785,8 @@ mod tests {
 
     #[test]
     fn test_query_model_missing_param() {
-        let model = test_model();
         let store = test_store();
-        let result = call_tool(&model, &store, "/tmp/x", "scrutinize", &json!({
+        let result = call_tool(&store, "/tmp/x", "scrutinize", &json!({
             "analysis": "transitive_deps"
         }));
         assert_eq!(result.is_error, Some(true));

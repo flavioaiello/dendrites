@@ -10,16 +10,16 @@ Without Dendrites, every new chat starts from zero. Copilot re-discovers your ar
 
 ### Copilot doesn't enforce architectural boundaries
 
-Left alone, Copilot will happily create a direct import from your domain layer into infrastructure, or skip aggregate roots entirely. Dendrites's `validate_dependency` and `get_architecture_overview` act as **guardrails that Copilot checks before generating code**. This is the highest-value feature — preventing architectural drift is expensive to fix later.
+Left alone, Copilot will happily create a direct import from your domain layer into infrastructure, or skip aggregate roots entirely. Dendrites's `mcp_dendrites_scrutinize` and `mcp_dendrites_get_model` act as **guardrails that Copilot checks before generating code**. This is the highest-value feature — preventing architectural drift is expensive to fix later.
 
 ### Actual vs Desired: explicit refactoring lifecycle
 
 Dendrites maintains two models side by side:
 
 - **Actual model** — reflects the currently implemented architecture
-- **Desired model** — the target state, refined iteratively via `update_model`
+- **Desired model** — the target state, refined iteratively via `mcp_dendrites_set_model`
 
-The difference between actual and desired is the **pending refactoring**. Call `draft_refactoring_plan` to see the diff and get code actions. After implementing, call `accept` to promote desired → actual. Call `reset` to discard changes.
+The difference between actual and desired is the **pending refactoring**. Call `mcp_dendrites_refactor` (plan) to see the diff and get code actions. After implementing, call `accept` to promote desired → actual. Call `reset` to discard changes.
 
 This separation means Copilot can freely evolve the desired model without side effects — acceptance is always explicit.
 
@@ -68,7 +68,7 @@ dendrites import dendrites.json --workspace /path/to/your/project
 ```
 
 The model is stored in `~/.dendrites/dendrites.db` (CozoDB), keyed by workspace path.
-If you skip this step, Dendrites starts with an empty model that Copilot can populate via `update_model`.
+If you skip this step, Dendrites starts with an empty model that Copilot can populate via `mcp_dendrites_set_model`.
 Imported models are set as both actual and desired — a clean starting point.
 
 ### 3. Integrate with VS Code / GitHub Copilot
@@ -113,10 +113,8 @@ Once connected, Copilot gains access to **6 tools** (4 read, 2 write), **1 promp
 
 | Tool | What it does |
 |------|-------------|
-| `get_architecture_overview` | Both actual and desired models with pending changes status |
-| `validate_dependency` | Checks if a cross-context dependency is allowed |
-| `suggest_file_path` | Where a new file should be placed per conventions |
-| `query_model` | Datalog-based analysis: transitive dependencies, circular dependency detection, layer violations, impact analysis, aggregate quality checks, dependency graphs, and custom Datalog queries |
+| `mcp_dendrites_get_model` | Returns both the actual and desired domain models, including pending changes status |
+| `mcp_dendrites_scrutinize` | Run Datalog-based analysis: transitive dependencies, layer violations, impact analysis, aggregate quality checks, and custom Datalog queries |
 
 ### Write Tools (update the desired model)
 
@@ -124,8 +122,8 @@ All mutations to the desired model are **auto-saved** to the local store.
 
 | Tool | What it does |
 |------|-------------|
-| `update_model` | Create, update, or remove any element in the **desired** model (bounded context, entity, service, event) |
-| `draft_refactoring_plan` | `plan` (default): diff actual vs desired → code actions. `accept`: promote desired → actual. `reset`: discard desired changes. |
+| `mcp_dendrites_set_model` | Create, update, or remove any element in the **desired** model. Operations merge structures and return suggested file paths automatically. |
+| `mcp_dendrites_refactor` | Manage the refactoring lifecycle: `plan` (diff actual vs desired → code actions), `accept` (promote desired → actual), `reset` (discard desired changes), or `scan` (force AST extraction). |
 
 ### Resources (Copilot can attach these as context)
 
@@ -147,44 +145,26 @@ All mutations to the desired model are **auto-saved** to the local store.
 **You ask:** *"Create a new endpoint to cancel a subscription"*
 
 Copilot will:
-1. Call `get_architecture_overview` → sees actual + desired models, status "in_sync"
-2. Call `suggest_file_path("Billing", "service", "CancelSubscription")` → `src/billing/application/cancel_subscription.rs`
-3. Call `validate_dependency("Billing", "Identity")` → allowed
-4. Generate code that:
-   - Places the handler in `src/billing/api/`
-   - Uses the `Subscription` aggregate's `cancel()` method
-   - Emits a domain event
-   - Follows error handling conventions (`thiserror`)
-   - Respects the repository pattern
+1. Call `mcp_dendrites_get_model` → sees actual + desired models, status "in_sync"
+2. Call `mcp_dendrites_scrutinize` (analysis: `layer_violations`) to ensure the request is valid
+3. Call `mcp_dendrites_set_model` to configure the new endpoint as a desired service, receiving auto-generated file paths 
+4. Generate code into the suggested path and run `mcp_dendrites_refactor` (action: `accept`)
 
 **You ask:** *"Add a field to User"*
 
 Copilot will:
-1. Call `get_architecture_overview` → sees existing entities, rules, conventions
-2. Call `update_model` to add the field to the desired model
-3. Call `draft_refactoring_plan` → gets code diff and migration notes
-4. Generate code, then call `draft_refactoring_plan` with `action: "accept"`
+1. Call `mcp_dendrites_get_model` → sees existing entities, rules, conventions
+2. Call `mcp_dendrites_set_model` to add the field to the desired model state
+3. Call `mcp_dendrites_refactor` (action: `plan`) → gets prioritized refactoring plan and migration notes
+4. Generate the code into `src/`
 
-### Bidirectional: Codebase → Model → Refactoring
+### Fully Automatic Actual State (Background Watcher)
 
-**You ask:** *"Analyze this codebase and build a domain model from it"*
+Dendrites runs a **hot background file watcher** on your workspace's `src/` directory.
 
-Copilot will:
-1. Scan the module structure → call `update_model` for each discovered bounded context
-2. Read entity files → call `update_model` with fields, methods, invariants
-3. Read service files → call `update_model` with dependencies and layer
-4. Call `draft_refactoring_plan` with `action: "accept"` to set this as the actual model
-
-**You then ask:** *"Rename the Identity context to Auth and add a `last_login` field to User"*
-
-Copilot will:
-1. Call `update_model` to update the desired model (auto-saved)
-2. Call `draft_refactoring_plan` → gets a prioritized list of code changes:
-   - `modify_file: src/identity/domain/user.rs` (high)
-   - `move_file: src/identity → src/auth` (critical)
-   - Migration note: *"New field 'last_login' on 'User' — needs ALTER TABLE migration"*
-3. Execute code actions in priority order
-4. Call `draft_refactoring_plan` with `action: "accept"` → actual = desired
+1. **Code to Model (Immediate):** As you or the AI writes code and saves `.rs` files, Dendrites immediately unpicks the AST and syncs the database's **Actual State** without prompting.
+2. **Model to Code (Desired):** When you ask for a refactoring, Copilot modifies the **Desired State** using `mcp_dendrites_set_model`.
+3. **The Refactor Cycle:** Copilot checks `mcp_dendrites_refactor` (plan) to know exactly the file diffs, executes the code, and triggers `accept` if needed. The background watcher confirms it.
 
 ## Domain Model Schema
 
@@ -223,7 +203,7 @@ Each workspace has two models:
 
 When a model is saved, Dendrites decomposes it into 16 CozoDB relations (context, entity, entity_field, entity_method, service, service_dep, event, invariant, etc.) that enable Datalog queries.
 
-### Built-in Analyses (via `query_model` tool)
+### Built-in Analyses (via `mcp_dendrites_scrutinize` tool)
 
 | Analysis | What it finds |
 |----------|--------------|
@@ -255,7 +235,7 @@ This means:
 
 ## Architectural Enforcement
 
-Dendrites doesn't just inform — it **constrains**. The `validate_dependency` tool lets Copilot check whether cross-context imports are allowed before generating them. The architectural rules describe invariants that Copilot will respect.
+Dendrites doesn't just inform — it **constrains**. The `mcp_dendrites_scrutinize` tool lets Copilot run mathematical proofs (Datalog queries) over your design, blocking illegal layer dependencies and ensuring architectural rules are respected before a line is written.
 
 Example rules from the included config:
 - **LAYER-001**: Domain layer must not depend on infrastructure
@@ -271,12 +251,12 @@ Dendrites ships a built-in `dendrites_guidelines` prompt that serves architectur
 ## Architecture
 
 This project uses Domain-Driven Design with a hexagonal architecture.
-Before writing any code, ALWAYS call `get_architecture_overview` from the Dendrites
+Before writing any code, ALWAYS call `mcp_dendrites_get_model` from the Dendrites
 server to understand actual and desired model state.
 
-When creating new files, call `suggest_file_path` to determine the correct location.
-When adding cross-context dependencies, call `validate_dependency` to verify it's allowed.
-After implementing refactorings, call `draft_refactoring_plan` with `action: "accept"`.
+When mutating models, rely on `mcp_dendrites_set_model` which will return suggested paths.
+Before large commits, verify dependency chains using `mcp_dendrites_scrutinize`.
+Use `mcp_dendrites_refactor` to accept proposed desired state changes.
 ```
 
 This ensures Copilot **proactively** queries the domain model rather than waiting for tool hints.

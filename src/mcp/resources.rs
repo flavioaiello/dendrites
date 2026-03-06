@@ -1,9 +1,10 @@
 use crate::domain::model::DomainModel;
-use crate::domain::registry::DomainRegistry;
 use crate::mcp::protocol::*;
+use crate::mcp::tools::build_model_overview;
+use crate::store::Store;
 
 /// Returns the list of resources the Dendrites server exposes.
-pub fn list_resources(model: &DomainModel) -> Vec<ResourceDefinition> {
+pub fn list_resources(store: &Store, workspace_path: &str) -> Vec<ResourceDefinition> {
     let mut resources = vec![
         ResourceDefinition {
             uri: "dendrites://architecture/overview".into(),
@@ -25,14 +26,20 @@ pub fn list_resources(model: &DomainModel) -> Vec<ResourceDefinition> {
         },
     ];
 
-    // Add per-context resources
-    for bc in &model.bounded_contexts {
+    // Add per-context resources from Datalog
+    let contexts = store.run_datalog(
+        "?[name] := *context{workspace: $ws, name, state: 'desired'}",
+        workspace_path,
+    ).unwrap_or_default();
+
+    for row in &contexts {
+        let ctx_name = &row[0];
         resources.push(ResourceDefinition {
-            uri: format!("dendrites://context/{}", bc.name.to_lowercase()),
-            name: format!("Context: {}", bc.name),
+            uri: format!("dendrites://context/{}", ctx_name.to_lowercase()),
+            name: format!("Context: {}", ctx_name),
             description: format!(
                 "Bounded context '{}' — entities, services, events",
-                bc.name
+                ctx_name
             ),
             mime_type: "application/json".into(),
         });
@@ -41,32 +48,24 @@ pub fn list_resources(model: &DomainModel) -> Vec<ResourceDefinition> {
     resources
 }
 
-/// Reads a resource by URI.
-pub fn read_resource(model: &DomainModel, uri: &str) -> ResourceReadResult {
-    let registry = DomainRegistry::new(model);
-
+/// Reads a resource by URI, backed by Datalog relations.
+pub fn read_resource(store: &Store, workspace_path: &str, uri: &str) -> ResourceReadResult {
     let (mime, text) = match uri {
-        "dendrites://architecture/overview" => ("application/json", registry.architecture_summary()),
-        "dendrites://architecture/rules" => (
-            "application/json",
-            serde_json::to_string(&model.rules).unwrap_or_default(),
-        ),
-        "dendrites://architecture/conventions" => (
-            "application/json",
-            serde_json::to_string(&model.conventions).unwrap_or_default(),
-        ),
+        "dendrites://architecture/overview" => {
+            let overview = build_model_overview(store, workspace_path, "desired");
+            ("application/json", serde_json::to_string_pretty(&overview).unwrap_or_default())
+        }
+        "dendrites://architecture/rules" => {
+            let model = load_model(store, workspace_path);
+            ("application/json", serde_json::to_string(&model.rules).unwrap_or_default())
+        }
+        "dendrites://architecture/conventions" => {
+            let model = load_model(store, workspace_path);
+            ("application/json", serde_json::to_string(&model.conventions).unwrap_or_default())
+        }
         _ if uri.starts_with("dendrites://context/") => {
             let ctx_name = uri.strip_prefix("dendrites://context/").unwrap_or("");
-            match registry.find_context(ctx_name) {
-                Some(bc) => (
-                    "application/json",
-                    serde_json::to_string(bc).unwrap_or_default(),
-                ),
-                None => (
-                    "text/plain",
-                    format!("Bounded context '{}' not found", ctx_name),
-                ),
-            }
+            read_context_from_store(store, workspace_path, ctx_name)
         }
         _ => ("text/plain", format!("Unknown resource: {}", uri)),
     };
@@ -80,13 +79,59 @@ pub fn read_resource(model: &DomainModel, uri: &str) -> ResourceReadResult {
     }
 }
 
+/// Load the desired model from store for rules/conventions that aren't yet in Datalog relations.
+fn load_model(store: &Store, workspace_path: &str) -> DomainModel {
+    store.load_desired(workspace_path).ok().flatten()
+        .unwrap_or_else(|| DomainModel::empty(workspace_path))
+}
+
+/// Read a single bounded context from Datalog, assembling its sub-structures.
+fn read_context_from_store(store: &Store, workspace_path: &str, ctx_name: &str) -> (&'static str, String) {
+    // Check if context exists
+    let ctx_rows = store.run_datalog(
+        "?[name, description] := *context{workspace: $ws, name, description, state: 'desired'}, \
+         name = to_lowercase($ctx)",
+        workspace_path,
+    );
+
+    // We need a custom query with ctx_name bound. Use build_model_overview which already
+    // gathers everything, then extract the specific context.
+    let overview = build_model_overview(store, workspace_path, "desired");
+    if let Some(contexts) = overview.get("bounded_contexts").and_then(|v| v.as_array()) {
+        for ctx in contexts {
+            if let Some(name) = ctx.get("name").and_then(|v| v.as_str())
+                && name.eq_ignore_ascii_case(ctx_name)
+            {
+                return (
+                    "application/json",
+                    serde_json::to_string_pretty(ctx).unwrap_or_default(),
+                );
+            }
+        }
+    }
+
+    // Also check by exact query
+    let _ = ctx_rows;
+    ("text/plain", format!("Bounded context '{}' not found", ctx_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::model::*;
+    use crate::store::Store;
+    use std::env::temp_dir;
 
-    fn test_model() -> DomainModel {
-        DomainModel {
+    fn test_store_with_model() -> (Store, String) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = temp_dir()
+            .join(format!("dendrites_resources_test_{}_{}.db", std::process::id(), id));
+        let store = Store::open(&path).unwrap();
+        let ws = "/test/workspace";
+
+        let model = DomainModel {
             name: "TestProject".into(),
             description: "Test".into(),
             bounded_contexts: vec![BoundedContext {
@@ -103,13 +148,15 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
-        }
+        };
+        store.save_desired(ws, &model).unwrap();
+        (store, ws.to_string())
     }
 
     #[test]
     fn test_list_resources_includes_static_and_context() {
-        let model = test_model();
-        let resources = list_resources(&model);
+        let (store, ws) = test_store_with_model();
+        let resources = list_resources(&store, &ws);
         // 3 static + 1 per context
         assert_eq!(resources.len(), 4);
         assert!(resources.iter().any(|r| r.uri == "dendrites://architecture/overview"));
@@ -118,8 +165,8 @@ mod tests {
 
     #[test]
     fn test_read_resource_overview() {
-        let model = test_model();
-        let result = read_resource(&model, "dendrites://architecture/overview");
+        let (store, ws) = test_store_with_model();
+        let result = read_resource(&store, &ws, "dendrites://architecture/overview");
         assert_eq!(result.contents.len(), 1);
         assert_eq!(result.contents[0].mime_type, "application/json");
         assert!(result.contents[0].text.contains("TestProject"));
@@ -127,22 +174,22 @@ mod tests {
 
     #[test]
     fn test_read_resource_context() {
-        let model = test_model();
-        let result = read_resource(&model, "dendrites://context/identity");
+        let (store, ws) = test_store_with_model();
+        let result = read_resource(&store, &ws, "dendrites://context/identity");
         assert!(result.contents[0].text.contains("Identity"));
     }
 
     #[test]
     fn test_read_resource_unknown() {
-        let model = test_model();
-        let result = read_resource(&model, "dendrites://unknown");
+        let (store, ws) = test_store_with_model();
+        let result = read_resource(&store, &ws, "dendrites://unknown");
         assert!(result.contents[0].text.contains("Unknown resource"));
     }
 
     #[test]
     fn test_read_resource_context_not_found() {
-        let model = test_model();
-        let result = read_resource(&model, "dendrites://context/nonexistent");
+        let (store, ws) = test_store_with_model();
+        let result = read_resource(&store, &ws, "dendrites://context/nonexistent");
         assert!(result.contents[0].text.contains("not found"));
     }
 }

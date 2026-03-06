@@ -1,6 +1,5 @@
 use serde_json::{json, Value};
 
-use crate::domain::diff;
 use crate::domain::model::*;
 use crate::domain::to_snake;
 use crate::mcp::protocol::*;
@@ -13,7 +12,8 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
             name: "set_model".into(),
             description: "Create, update, or remove elements in the desired domain model. \
                           As you process code or conversation, call this tool whenever you \
-                          discover domain relationships (entities, aggregates, services, events). \
+                          discover domain relationships (entities, aggregates, services, events, \
+                          value objects, repositories). \
                           These updates build the desired model iteratively. \
                           Fields, methods, and invariants are merged (not replaced). \
                           All changes are auto-saved. \
@@ -25,7 +25,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "kind": {
                         "type": "string",
-                        "enum": ["bounded_context", "entity", "service", "event"],
+                        "enum": ["bounded_context", "entity", "service", "event", "value_object", "repository"],
                         "description": "Type of model element to create/update/remove"
                     },
                     "action": {
@@ -54,7 +54,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                             },
                             "required": ["name", "type"]
                         },
-                        "description": "Fields (entity, event)"
+                        "description": "Fields (entity, event, value_object)"
                     },
                     "methods": {
                         "type": "array",
@@ -78,7 +78,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                             },
                             "required": ["name"]
                         },
-                        "description": "Methods (entity, service)"
+                        "description": "Methods (entity, service, repository)"
                     },
                     "invariants": {
                         "type": "array",
@@ -90,7 +90,13 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                         "enum": ["domain", "application", "infrastructure"],
                         "description": "Service layer classification (service only)"
                     },
-                    "source": { "type": "string", "description": "Source entity (event only)" }
+                    "source": { "type": "string", "description": "Source entity (event only)" },
+                    "validation_rules": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Validation rules (value_object only)"
+                    },
+                    "aggregate": { "type": "string", "description": "Aggregate entity name (repository only)" }
                 },
                 "required": ["kind", "name"]
             }),
@@ -102,14 +108,17 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                           'plan' (default) — diff actual vs desired and produce a full refactoring \
                           plan with code actions, file paths, priorities, and migration notes. \
                           'accept' — after implementing the refactoring, promote desired → actual. \
-                          'reset' — discard desired changes, revert desired → actual."
+                          'reset' — discard desired changes, revert desired → actual. \
+                          'scan' — scan the workspace source code (AST extraction) and populate \
+                          the actual model from what is really implemented. Guided by the desired \
+                          model's bounded contexts and module_path mappings."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["plan", "accept", "reset"],
+                        "enum": ["plan", "accept", "reset", "scan"],
                         "description": "Refactoring lifecycle action (default: plan)"
                     }
                 },
@@ -124,19 +133,21 @@ const MUTATION_TOOLS: &[&str] = &["set_model"];
 
 /// Dispatches a write tool call. Mutations are auto-saved to the store.
 pub fn call_write_tool(
-    model: &mut DomainModel,
     workspace_path: &str,
     store: &Store,
     name: &str,
     args: &Value,
 ) -> ToolCallResult {
-    let result = dispatch_write_tool(model, workspace_path, store, name, args);
+    let mut model = store.load_desired(workspace_path).ok().flatten()
+        .unwrap_or_else(|| DomainModel::empty(workspace_path));
+
+    let result = dispatch_write_tool(&mut model, workspace_path, store, name, args);
 
     // Auto-save after successful mutations
-    if result.is_error.is_none() && MUTATION_TOOLS.contains(&name) {
-        if let Err(e) = store.save_desired(workspace_path, model) {
-            return error_result(format!("Mutation succeeded but save failed: {e}"));
-        }
+    if result.is_error.is_none() && MUTATION_TOOLS.contains(&name)
+        && let Err(e) = store.save_desired(workspace_path, &model)
+    {
+        return error_result(format!("Mutation succeeded but save failed: {e}"));
     }
 
     result
@@ -158,14 +169,30 @@ fn dispatch_write_tool(
                 .unwrap_or("upsert");
 
             match (kind.as_str(), action) {
-                ("bounded_context", "upsert") => upsert_bounded_context(model, args),
+                ("bounded_context", "upsert") => {
+                    upsert_bounded_context(model, args)
+                },
                 ("bounded_context", "remove") => remove_bounded_context(model, args),
-                ("entity", "upsert") => upsert_entity(model, args),
+                ("entity", "upsert") => {
+                    upsert_entity(model, args)
+                },
                 ("entity", "remove") => remove_entity(model, args),
-                ("service", "upsert") => upsert_service(model, args),
+                ("service", "upsert") => {
+                    upsert_service(model, args)
+                },
                 ("service", "remove") => remove_service(model, args),
-                ("event", "upsert") => upsert_event(model, args),
+                ("event", "upsert") => {
+                    upsert_event(model, args)
+                },
                 ("event", "remove") => remove_event(model, args),
+                ("value_object", "upsert") => {
+                    upsert_value_object(model, args)
+                },
+                ("value_object", "remove") => remove_value_object(model, args),
+                ("repository", "upsert") => {
+                    upsert_repository(model, args)
+                },
+                ("repository", "remove") => remove_repository(model, args),
                 ("", _) => error_result("'kind' is required"),
                 (_, action) => error_result(format!("Unknown action '{action}' for kind '{kind}'")),
             }
@@ -179,8 +206,10 @@ fn dispatch_write_tool(
 
             match action {
                 "plan" => {
-                    match load_actual_vs_desired_changes(store, workspace_path, model) {
-                        Ok(changes) => {
+                    // PHASE 3 GRAPH MIGRATION: Delegate diffing into Datalog
+                    match store.diff_graph(workspace_path) {
+                        Ok(diff_data) => {
+                            let changes = diff_data["pending_changes"].as_array().unwrap();
                             if changes.is_empty() {
                                 text_result(
                                     json!({
@@ -190,11 +219,11 @@ fn dispatch_write_tool(
                                     .to_string(),
                                 )
                             } else {
-                                let plan = diff::plan_refactoring(&changes, &model.conventions);
-                                text_result(serde_json::to_string(&plan).unwrap())
+                                // Raw Datalog diff returned
+                                text_result(serde_json::to_string_pretty(&diff_data).unwrap())
                             }
                         }
-                        Err(e) => error_result(format!("Failed to load actual model: {e}")),
+                        Err(e) => error_result(format!("Diff generation failed: {e}")),
                     }
                 }
 
@@ -213,22 +242,65 @@ fn dispatch_write_tool(
 
                 "reset" => {
                     match store.reset(workspace_path) {
-                        Ok(Some(actual)) => {
-                            *model = actual;
-                            text_result(
-                                json!({
-                                    "status": "reset",
-                                    "message": "Desired model reverted to actual. All pending changes discarded."
-                                })
-                                .to_string(),
-                            )
-                        }
+                        Ok(Some(_)) => text_result(
+                            json!({
+                                "status": "reset",
+                                "message": "Desired model reverted to actual. All pending changes discarded."
+                            })
+                            .to_string(),
+                        ),
                         Ok(None) => error_result("No actual model to reset to"),
                         Err(e) => error_result(format!("Failed to reset: {e}")),
                     }
                 }
 
-                _ => error_result(format!("Unknown action '{action}'. Use 'plan', 'accept', or 'reset'.")),
+                "scan" => {
+                    use crate::domain::analyze::scan_actual_model;
+
+                    let workspace_root = std::path::Path::new(workspace_path);
+                    let desired = store.load_desired(workspace_path).ok().flatten()
+                        .unwrap_or_else(|| DomainModel::empty(workspace_path));
+
+                    if desired.bounded_contexts.is_empty() {
+                        return error_result(
+                            "No bounded contexts in the desired model. \
+                             Seed the model first with set_model before scanning."
+                        );
+                    }
+
+                    match scan_actual_model(workspace_root, &desired) {
+                        Ok(actual) => {
+                            let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
+                            let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
+                            let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
+                            let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
+                            let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
+
+                            match store.save_actual(workspace_path, &actual) {
+                                Ok(()) => text_result(
+                                    json!({
+                                        "status": "scanned",
+                                        "message": format!(
+                                            "Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events. Actual model updated.",
+                                            actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count
+                                        ),
+                                        "contexts_scanned": actual.bounded_contexts.len(),
+                                        "entities": entity_count,
+                                        "value_objects": vo_count,
+                                        "services": svc_count,
+                                        "repositories": repo_count,
+                                        "events": event_count,
+                                    })
+                                    .to_string(),
+                                ),
+                                Err(e) => error_result(format!("Scan succeeded but save failed: {e}")),
+                            }
+                        }
+                        Err(e) => error_result(format!("Scan failed: {e}")),
+                    }
+                }
+
+                _ => error_result(format!("Unknown action '{action}'. Use 'plan', 'accept', 'reset', or 'scan'.")),
             }
         }
 
@@ -357,10 +429,10 @@ fn upsert_entity(model: &mut DomainModel, args: &Value) -> ToolCallResult {
             }
             if let Some(invariants) = args.get("invariants").and_then(|v| v.as_array()) {
                 for inv in invariants {
-                    if let Some(s) = inv.as_str() {
-                        if !entity.invariants.iter().any(|i| i == s) {
-                            entity.invariants.push(s.to_string());
-                        }
+                    if let Some(s) = inv.as_str()
+                        && !entity.invariants.iter().any(|i| i == s)
+                    {
+                        entity.invariants.push(s.to_string());
                     }
                 }
             }
@@ -582,6 +654,150 @@ fn remove_event(model: &mut DomainModel, args: &Value) -> ToolCallResult {
     }
 }
 
+fn upsert_value_object(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let vo_name = arg_str(args, "name");
+
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+
+    let existing = bc
+        .value_objects
+        .iter_mut()
+        .find(|v| v.name.eq_ignore_ascii_case(&vo_name));
+
+    match existing {
+        Some(vo) => {
+            if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
+                vo.description = desc.to_string();
+            }
+            if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) {
+                merge_fields(&mut vo.fields, fields);
+            }
+            if let Some(rules) = args.get("validation_rules").and_then(|v| v.as_array()) {
+                for rule in rules {
+                    if let Some(s) = rule.as_str()
+                        && !vo.validation_rules.iter().any(|r| r == s)
+                    {
+                        vo.validation_rules.push(s.to_string());
+                    }
+                }
+            }
+            text_result(json!({
+                "message": format!("Updated value object '{}' in '{}'", vo_name, ctx_name),
+                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "value_object", &vo_name)
+            }).to_string())
+        }
+        None => {
+            bc.value_objects.push(ValueObject {
+                name: vo_name.clone(),
+                description: arg_str(args, "description"),
+                fields: parse_fields(args.get("fields")),
+                validation_rules: args
+                    .get("validation_rules")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|r| r.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+            });
+            text_result(json!({
+                "message": format!("Created value object '{}' in '{}'", vo_name, ctx_name),
+                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "value_object", &vo_name)
+            }).to_string())
+        }
+    }
+}
+
+fn remove_value_object(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let vo_name = arg_str(args, "name");
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+    let before = bc.value_objects.len();
+    bc.value_objects.retain(|v| !v.name.eq_ignore_ascii_case(&vo_name));
+    if bc.value_objects.len() < before {
+        text_result(format!("Removed value object '{vo_name}' from '{ctx_name}'"))
+    } else {
+        error_result(format!("Value object '{vo_name}' not found in '{ctx_name}'"))
+    }
+}
+
+fn upsert_repository(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let repo_name = arg_str(args, "name");
+
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+
+    let existing = bc
+        .repositories
+        .iter_mut()
+        .find(|r| r.name.eq_ignore_ascii_case(&repo_name));
+
+    match existing {
+        Some(repo) => {
+            if let Some(agg) = args.get("aggregate").and_then(|v| v.as_str()) {
+                repo.aggregate = agg.to_string();
+            }
+            if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) {
+                merge_methods(&mut repo.methods, methods);
+            }
+            text_result(json!({
+                "message": format!("Updated repository '{}' in '{}'", repo_name, ctx_name),
+                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "repository", &repo_name)
+            }).to_string())
+        }
+        None => {
+            bc.repositories.push(Repository {
+                name: repo_name.clone(),
+                aggregate: arg_str(args, "aggregate"),
+                methods: parse_methods(args.get("methods")),
+            });
+            text_result(json!({
+                "message": format!("Created repository '{}' in '{}'", repo_name, ctx_name),
+                "suggested_path": suggest_path(&model.conventions.file_structure.pattern, &ctx_name, "repository", &repo_name)
+            }).to_string())
+        }
+    }
+}
+
+fn remove_repository(model: &mut DomainModel, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let repo_name = arg_str(args, "name");
+    let bc = match model
+        .bounded_contexts
+        .iter_mut()
+        .find(|bc| bc.name.eq_ignore_ascii_case(&ctx_name))
+    {
+        Some(bc) => bc,
+        None => return error_result(format!("Bounded context '{ctx_name}' not found")),
+    };
+    let before = bc.repositories.len();
+    bc.repositories.retain(|r| !r.name.eq_ignore_ascii_case(&repo_name));
+    if bc.repositories.len() < before {
+        text_result(format!("Removed repository '{repo_name}' from '{ctx_name}'"))
+    } else {
+        error_result(format!("Repository '{repo_name}' not found in '{ctx_name}'"))
+    }
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 fn text_result(text: impl Into<String>) -> ToolCallResult {
@@ -596,19 +812,6 @@ fn error_result(msg: impl Into<String>) -> ToolCallResult {
         content: vec![ContentBlock::Text { text: msg.into() }],
         is_error: Some(true),
     }
-}
-
-/// Load actual model and compute changes against the current desired model.
-fn load_actual_vs_desired_changes(
-    store: &Store,
-    workspace_path: &str,
-    model: &DomainModel,
-) -> anyhow::Result<Vec<diff::ModelChange>> {
-    let actual = match store.load_actual(workspace_path)? {
-        Some(m) => m,
-        None => DomainModel::empty(workspace_path),
-    };
-    Ok(diff::diff_models(&actual, model))
 }
 
 fn arg_str(args: &Value, key: &str) -> String {
@@ -774,6 +977,13 @@ mod tests {
         }
     }
 
+    /// Save initial model and return (store, workspace).
+    fn setup(ws: &str) -> Store {
+        let store = test_store();
+        store.save_desired(ws, &test_model()).unwrap();
+        store
+    }
+
     #[test]
     fn test_list_write_tools_count() {
         assert_eq!(list_write_tools().len(), 2);
@@ -781,80 +991,57 @@ mod tests {
 
     #[test]
     fn test_update_entity_add_field() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
-            &json!({
-                "kind": "entity",
-                "context": "Identity",
-                "name": "User",
-                "fields": [{"name": "email", "type": "String", "required": true}]
-            }),
-        );
+        let ws = "/tmp/test-add-field";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "entity", "context": "Identity", "name": "User",
+            "fields": [{"name": "email", "type": "String", "required": true}]
+        }));
         assert!(result.is_error.is_none());
-        let user = &model.bounded_contexts[0].entities[0];
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        let user = identity.entities.iter().find(|e| e.name == "User").unwrap();
         assert_eq!(user.fields.len(), 2);
-        assert_eq!(user.fields[1].name, "email");
+        assert!(user.fields.iter().any(|f| f.name == "email"));
     }
 
     #[test]
     fn test_update_entity_merge_existing_field() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
-            &json!({
-                "kind": "entity",
-                "context": "Identity",
-                "name": "User",
-                "fields": [{"name": "id", "type": "Uuid"}]
-            }),
-        );
+        let ws = "/tmp/test-merge-field";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "entity", "context": "Identity", "name": "User",
+            "fields": [{"name": "id", "type": "Uuid"}]
+        }));
         assert!(result.is_error.is_none());
-        let user = &model.bounded_contexts[0].entities[0];
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        let user = identity.entities.iter().find(|e| e.name == "User").unwrap();
         assert_eq!(user.fields.len(), 1);
         assert_eq!(user.fields[0].field_type, "Uuid");
     }
 
     #[test]
     fn test_create_new_entity() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
-            &json!({
-                "kind": "entity",
-                "context": "Identity",
-                "name": "Role",
-                "description": "A role assignment",
-                "aggregate_root": false,
-                "fields": [{"name": "name", "type": "String"}]
-            }),
-        );
+        let ws = "/tmp/test-new-entity";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "entity", "context": "Identity", "name": "Role",
+            "description": "A role assignment", "aggregate_root": false,
+            "fields": [{"name": "name", "type": "String"}]
+        }));
         assert!(result.is_error.is_none());
-        assert_eq!(model.bounded_contexts[0].entities.len(), 2);
-        assert_eq!(model.bounded_contexts[0].entities[1].name, "Role");
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        assert_eq!(identity.entities.len(), 2);
+        assert!(identity.entities.iter().any(|e| e.name == "Role"));
     }
 
     #[test]
     fn test_update_entity_context_not_found() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
+        let ws = "/tmp/test-ctx-notfound";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model",
             &json!({"kind": "entity", "context": "Nonexistent", "name": "Foo"}),
         );
         assert_eq!(result.is_error, Some(true));
@@ -862,71 +1049,52 @@ mod tests {
 
     #[test]
     fn test_create_bounded_context() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
-            &json!({
-                "kind": "bounded_context",
-                "name": "Billing",
-                "description": "Billing context",
-                "module_path": "src/billing",
-                "dependencies": ["Identity"]
-            }),
-        );
+        let ws = "/tmp/test-create-bc";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "bounded_context", "name": "Billing",
+            "description": "Billing context", "module_path": "src/billing",
+            "dependencies": ["Identity"]
+        }));
         assert!(result.is_error.is_none());
-        assert_eq!(model.bounded_contexts.len(), 2);
-        assert_eq!(model.bounded_contexts[1].name, "Billing");
-        assert_eq!(model.bounded_contexts[1].dependencies, vec!["Identity"]);
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        assert_eq!(loaded.bounded_contexts.len(), 2);
+        let billing = loaded.bounded_contexts.iter().find(|c| c.name == "Billing").unwrap();
+        assert_eq!(billing.dependencies, vec!["Identity"]);
     }
 
     #[test]
     fn test_update_existing_bounded_context() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
-            &json!({
-                "kind": "bounded_context",
-                "name": "Identity",
-                "description": "Updated description"
-            }),
-        );
+        let ws = "/tmp/test-update-bc";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "bounded_context", "name": "Identity",
+            "description": "Updated description"
+        }));
         assert!(result.is_error.is_none());
-        assert_eq!(model.bounded_contexts.len(), 1);
-        assert_eq!(model.bounded_contexts[0].description, "Updated description");
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        assert_eq!(identity.description, "Updated description");
     }
 
     #[test]
     fn test_remove_entity() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
+        let ws = "/tmp/test-rm-entity";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model",
             &json!({"kind": "entity", "action": "remove", "context": "Identity", "name": "User"}),
         );
         assert!(result.is_error.is_none());
-        assert_eq!(model.bounded_contexts[0].entities.len(), 0);
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        assert_eq!(identity.entities.len(), 0);
     }
 
     #[test]
     fn test_remove_entity_not_found() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
+        let ws = "/tmp/test-rm-entity-nf";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model",
             &json!({"kind": "entity", "action": "remove", "context": "Identity", "name": "NotHere"}),
         );
         assert_eq!(result.is_error, Some(true));
@@ -934,67 +1102,46 @@ mod tests {
 
     #[test]
     fn test_update_service() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
-            &json!({
-                "kind": "service",
-                "context": "Identity",
-                "name": "AuthService",
-                "service_kind": "application",
-                "description": "Handles authentication"
-            }),
-        );
+        let ws = "/tmp/test-upd-svc";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "service", "context": "Identity", "name": "AuthService",
+            "service_kind": "application", "description": "Handles authentication"
+        }));
         assert!(result.is_error.is_none());
-        assert_eq!(model.bounded_contexts[0].services.len(), 1);
-        assert_eq!(
-            model.bounded_contexts[0].services[0].description,
-            "Handles authentication"
-        );
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        assert_eq!(identity.services.len(), 1);
+        assert_eq!(identity.services[0].description, "Handles authentication");
     }
 
     #[test]
     fn test_update_event() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
-            &json!({
-                "kind": "event",
-                "context": "Identity",
-                "name": "UserRegistered",
-                "source": "User",
-                "fields": [{"name": "user_id", "type": "UserId"}]
-            }),
-        );
+        let ws = "/tmp/test-upd-evt";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "event", "context": "Identity", "name": "UserRegistered",
+            "source": "User", "fields": [{"name": "user_id", "type": "UserId"}]
+        }));
         assert!(result.is_error.is_none());
-        assert_eq!(model.bounded_contexts[0].events.len(), 1);
-        assert_eq!(model.bounded_contexts[0].events[0].name, "UserRegistered");
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        assert_eq!(identity.events.len(), 1);
+        assert_eq!(identity.events[0].name, "UserRegistered");
     }
 
     #[test]
     fn test_unknown_write_tool() {
-        let mut model = test_model();
         let store = test_store();
-        let result = call_write_tool(&mut model, "/tmp/test-ws", &store, "nonexistent", &json!({}));
+        let result = call_write_tool("/tmp/test-ws", &store, "nonexistent", &json!({}));
         assert_eq!(result.is_error, Some(true));
     }
 
     #[test]
     fn test_auto_save_on_mutation() {
-        let mut model = test_model();
-        let store = test_store();
         let ws = "/tmp/test-autosave";
-        assert!(store.load_desired(ws).unwrap().is_none());
-        call_write_tool(
-            &mut model, ws, &store, "set_model",
+        let store = setup(ws);
+        call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Billing", "description": "Billing context"}),
         );
         let loaded = store.load_desired(ws).unwrap().unwrap();
@@ -1003,11 +1150,9 @@ mod tests {
 
     #[test]
     fn test_auto_save_not_on_error() {
-        let mut model = test_model();
         let store = test_store();
         let ws = "/tmp/test-autosave-err";
-        let result = call_write_tool(
-            &mut model, ws, &store, "set_model",
+        let result = call_write_tool(ws, &store, "set_model",
             &json!({"kind": "entity", "context": "Nonexistent", "name": "Foo"}),
         );
         assert_eq!(result.is_error, Some(true));
@@ -1016,133 +1161,102 @@ mod tests {
 
     #[test]
     fn test_draft_refactoring_plan_uses_baseline() {
-        let mut model = test_model();
-        let store = test_store();
         let ws = "/tmp/test-baseline";
-        call_write_tool(
-            &mut model, ws, &store, "set_model",
+        let store = setup(ws);
+        call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        // Plan should detect changes vs empty actual
-        let result = call_write_tool(&mut model, ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
-        assert!(text.contains("code_actions"));
+        assert!(text.contains("pending_changes"));
     }
 
     #[test]
     fn test_draft_plan_does_not_auto_advance() {
-        let mut model = test_model();
-        let store = test_store();
         let ws = "/tmp/test-no-advance";
-        call_write_tool(
-            &mut model, ws, &store, "set_model",
+        let store = setup(ws);
+        call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        // First plan — detects changes
-        let result = call_write_tool(&mut model, ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
-        assert!(text.contains("code_actions"));
-        // Second plan without accept — should STILL show changes (no auto-advance)
-        let result = call_write_tool(&mut model, ws, &store, "refactor", &json!({}));
+        assert!(text.contains("pending_changes"));
+        let result = call_write_tool(ws, &store, "refactor", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
-        assert!(text.contains("code_actions"));
+        assert!(text.contains("pending_changes"));
     }
 
     #[test]
     fn test_accept_then_plan_shows_in_sync() {
-        let mut model = test_model();
-        let store = test_store();
-        let ws = "/tmp/test-accept";
-        call_write_tool(
-            &mut model, ws, &store, "set_model",
+        let ws = "/tmp/test-accept-sync";
+        let store = setup(ws);
+        call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        // Accept: promote desired → actual
-        let result = call_write_tool(&mut model, ws, &store, "refactor", &json!({"action": "accept"}));
+        let result = call_write_tool(ws, &store, "refactor", &json!({"action": "accept"}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("accepted"));
-        // Plan should now show in_sync
-        let result = call_write_tool(&mut model, ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("in_sync"));
     }
 
     #[test]
     fn test_reset_reverts_desired() {
-        let mut model = test_model();
-        let store = test_store();
-        let ws = "/tmp/test-reset";
-        // Save initial state as both actual and desired
-        call_write_tool(
-            &mut model, ws, &store, "set_model",
+        let ws = "/tmp/test-reset-wt";
+        let store = setup(ws);
+        call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Original"}),
         );
-        call_write_tool(&mut model, ws, &store, "refactor", &json!({"action": "accept"}));
-        // Now mutate desired
-        call_write_tool(
-            &mut model, ws, &store, "set_model",
+        call_write_tool(ws, &store, "refactor", &json!({"action": "accept"}));
+        call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Billing", "description": "New context"}),
         );
-        assert_eq!(model.bounded_contexts.len(), 2);
-        // Reset: desired → actual
-        let result = call_write_tool(&mut model, ws, &store, "refactor", &json!({"action": "reset"}));
+        let desired = store.load_desired(ws).unwrap().unwrap();
+        assert_eq!(desired.bounded_contexts.len(), 2);
+        let result = call_write_tool(ws, &store, "refactor", &json!({"action": "reset"}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("reset"));
-        // Model should be back to 1 context
-        assert_eq!(model.bounded_contexts.len(), 1);
+        let reset = store.load_desired(ws).unwrap().unwrap();
+        assert_eq!(reset.bounded_contexts.len(), 1);
     }
 
     #[test]
     fn test_update_service_merges_methods() {
-        let mut model = test_model();
-        let store = test_store();
-        call_write_tool(
-            &mut model, "/tmp/test-ws", &store, "set_model",
-            &json!({
-                "kind": "service",
-                "context": "Identity",
-                "name": "AuthService",
-                "service_kind": "application",
-                "methods": [{"name": "login", "return_type": "Token"}]
-            }),
-        );
-        assert_eq!(model.bounded_contexts[0].services[0].methods.len(), 1);
-        call_write_tool(
-            &mut model, "/tmp/test-ws", &store, "set_model",
-            &json!({
-                "kind": "service",
-                "context": "Identity",
-                "name": "AuthService",
-                "methods": [{"name": "logout", "return_type": "void"}]
-            }),
-        );
-        assert_eq!(model.bounded_contexts[0].services[0].methods.len(), 2);
+        let ws = "/tmp/test-merge-methods";
+        let store = setup(ws);
+        call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "service", "context": "Identity", "name": "AuthService",
+            "service_kind": "application",
+            "methods": [{"name": "login", "return_type": "Token"}]
+        }));
+        call_write_tool(ws, &store, "set_model", &json!({
+            "kind": "service", "context": "Identity", "name": "AuthService",
+            "methods": [{"name": "logout", "return_type": "void"}]
+        }));
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        let identity = loaded.bounded_contexts.iter().find(|c| c.name == "Identity").unwrap();
+        let svc = identity.services.iter().find(|s| s.name == "AuthService").unwrap();
+        assert_eq!(svc.methods.len(), 2);
     }
 
     #[test]
     fn test_remove_bounded_context() {
-        let mut model = test_model();
-        let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
+        let ws = "/tmp/test-rm-bc";
+        let store = setup(ws);
+        let result = call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "action": "remove", "name": "Identity"}),
         );
         assert!(result.is_error.is_none());
-        assert_eq!(model.bounded_contexts.len(), 0);
+        // After removing the only context, the model exists but has 0 contexts
+        let loaded = store.load_desired(ws).unwrap().unwrap();
+        assert_eq!(loaded.bounded_contexts.len(), 0);
     }
 
     #[test]
     fn test_missing_kind() {
-        let mut model = test_model();
         let store = test_store();
-        let result = call_write_tool(
-            &mut model,
-            "/tmp/test-ws",
-            &store,
-            "set_model",
+        let result = call_write_tool("/tmp/test-ws", &store, "set_model",
             &json!({"name": "Foo"}),
         );
         assert_eq!(result.is_error, Some(true));

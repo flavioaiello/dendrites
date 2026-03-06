@@ -1,7 +1,7 @@
 [package]
 name = "dendrites"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Domain Model Context Protocol Server - Architectural meta-layer for GitHub Copilot"
 license = "MIT"
 
@@ -15,3 +15,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 cozo = { package = "cozo-ce", version = "0.7.13-alpha.3", default-features = false, features = ["minimal", "rayon"] }
 dirs = "5"
+syn = { version = "2.0", features = ["full", "visit"] }
+walkdir = "2"
+ignore = "0.4.20"
+notify = "8.2.0"

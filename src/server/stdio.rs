@@ -6,6 +6,12 @@ use crate::domain::model::DomainModel;
 use crate::mcp::{protocol::*, prompts, resources, tools, write_tools};
 use crate::store::Store;
 
+/// Load the desired model from store, falling back to an empty model.
+fn load_model(store: &Store, workspace_path: &str) -> DomainModel {
+    store.load_desired(workspace_path).ok().flatten()
+        .unwrap_or_else(|| DomainModel::empty(workspace_path))
+}
+
 /// List of write-tool names used to route `tools/call` to the mutable path.
 const WRITE_TOOLS: &[&str] = &[
     "set_model",
@@ -14,7 +20,7 @@ const WRITE_TOOLS: &[&str] = &[
 
 /// Run the MCP server over stdio (stdin/stdout), the standard transport for
 /// VS Code / GitHub Copilot MCP integration.
-pub async fn run(mut model: DomainModel, workspace_path: String, store: Store) -> Result<()> {
+pub async fn run(workspace_path: String, store: std::sync::Arc<Store>) -> Result<()> {
     let stdin = BufReader::new(io::stdin());
     let mut stdout = io::stdout();
     let mut lines = stdin.lines();
@@ -38,7 +44,7 @@ pub async fn run(mut model: DomainModel, workspace_path: String, store: Store) -
             }
         };
 
-        let response = handle_request(&mut model, &workspace_path, &store, &request);
+        let response = handle_request(&workspace_path, &store, &request);
 
         // Notifications (no id) don't get a response
         if request.id.is_some() {
@@ -50,7 +56,6 @@ pub async fn run(mut model: DomainModel, workspace_path: String, store: Store) -
 }
 
 fn handle_request(
-    model: &mut DomainModel,
     workspace_path: &str,
     store: &Store,
     req: &JsonRpcRequest,
@@ -66,7 +71,7 @@ fn handle_request(
                     prompts: Some(PromptsCapability {}),
                 },
                 server_info: ServerInfo {
-                    name: format!("dendrites ({})", model.name),
+                    name: format!("dendrites ({})", load_model(store, workspace_path).name),
                     version: env!("CARGO_PKG_VERSION").into(),
                 },
             };
@@ -108,9 +113,9 @@ fn handle_request(
             };
 
             let result = if WRITE_TOOLS.contains(&params.name.as_str()) {
-                write_tools::call_write_tool(model, workspace_path, store, &params.name, &params.arguments)
+                write_tools::call_write_tool(workspace_path, store, &params.name, &params.arguments)
             } else {
-                tools::call_tool(model, store, workspace_path, &params.name, &params.arguments)
+                tools::call_tool(store, workspace_path, &params.name, &params.arguments)
             };
             JsonRpcResponse::success(req.id.clone(), serde_json::to_value(result).unwrap())
         }
@@ -118,7 +123,7 @@ fn handle_request(
         // ── Resources ──────────────────────────────────────────────
         "resources/list" => {
             let result = ResourcesListResult {
-                resources: resources::list_resources(model),
+                resources: resources::list_resources(store, workspace_path),
             };
             JsonRpcResponse::success(req.id.clone(), serde_json::to_value(result).unwrap())
         }
@@ -144,7 +149,7 @@ fn handle_request(
                 }
             };
 
-            let result = resources::read_resource(model, &params.uri);
+            let result = resources::read_resource(store, workspace_path, &params.uri);
             JsonRpcResponse::success(req.id.clone(), serde_json::to_value(result).unwrap())
         }
 
@@ -177,7 +182,8 @@ fn handle_request(
                 }
             };
 
-            match prompts::get_prompt(model, store, workspace_path, &params.name) {
+            let model = load_model(store, workspace_path);
+            match prompts::get_prompt(&model, store, workspace_path, &params.name) {
                 Some(result) => {
                     JsonRpcResponse::success(req.id.clone(), serde_json::to_value(result).unwrap())
                 }
