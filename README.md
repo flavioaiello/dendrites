@@ -1,6 +1,16 @@
-# Dendrites — Domain Model Context Protocol Server
+<p align="center">
+  <img src="dendrites.svg" alt="Dendrites" width="480" />
+</p>
 
-A Rust-based MCP server that feeds **domain model abstractions** into GitHub Copilot, ensuring AI-generated code follows your architecture, conventions, and domain-driven design patterns.
+<p align="center">
+  <em>A Rust-based MCP server that feeds <strong>domain model abstractions</strong> into GitHub Copilot,<br/>ensuring AI-generated code follows your architecture, conventions, and domain-driven design patterns.</em>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> · <a href="#how-it-works-with-copilot">How It Works</a> · <a href="#domain-model-schema">Schema</a> · <a href="#installation">Install</a>
+</p>
+
+---
 
 ## Why Dendrites?
 

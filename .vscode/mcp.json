@@ -1,9 +1,0 @@
-{
-    "servers": {
-        "dendrites": {
-            "type": "stdio",
-            "command": "~/.cargo/bin/dendrites",
-            "args": ["serve", "--workspace", "${workspaceFolder}"]
-        }
-    }
-}
