@@ -3,8 +3,7 @@ class Dendrites < Formula
   homepage "https://github.com/flavioaiello/dendrites"
   license "MIT"
   url "https://github.com/flavioaiello/dendrites/archive/refs/tags/v0.1.1.tar.gz"
-  # sha256 will be updated after release tarball is available
-  sha256 ""
+  sha256 "157ab2aa6593486b998a97c4a852a3a71c636575ef4c8469dc377f0fe7f313a2"
   version "0.1.1"
 
   head "https://github.com/flavioaiello/dendrites.git", branch: "main"
