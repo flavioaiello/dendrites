@@ -31,7 +31,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                           All relations have a `state` column ('desired' | 'actual') for \
                           set-differencing. Use $ws to reference the current workspace. \
                           Relations: context, context_dep, entity, service, service_dep, event, \
-                          value_object, repository, invariant, field, method, method_param, vo_rule."
+                          value_object, repository, module, invariant, field, method, method_param, vo_rule."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -246,6 +246,12 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
         workspace,
     ).unwrap_or_default();
 
+    let modules = store.run_datalog(
+        &format!("?[ctx, name, path, public, file_path, description] := \
+            *module{{workspace: $ws, context: ctx, name, state: '{state}', path, public, file_path, description}}"),
+        workspace,
+    ).unwrap_or_default();
+
     // Assemble per-context JSON
     let bc_json: Vec<Value> = contexts.iter().map(|ctx_row| {
         let ctx_name = &ctx_row[0];
@@ -349,7 +355,12 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
         json!({
             "name": ctx_name, "description": ctx_row[1], "module": ctx_row[2],
             "entities": ctx_entities, "services": ctx_services, "events": ctx_events,
-            "value_objects": ctx_vos, "repositories": ctx_repos, "depends_on": deps,
+            "value_objects": ctx_vos, "repositories": ctx_repos,
+            "modules": modules.iter()
+                .filter(|m| m[0] == *ctx_name)
+                .map(|m| json!({"name": m[1], "path": m[2], "public": m[3] == "true", "file_path": m[4], "description": m[5]}))
+                .collect::<Vec<Value>>(),
+            "depends_on": deps,
         })
     }).collect();
 
