@@ -126,26 +126,35 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "refactor".into(),
+            name: "refactor_model".into(),
             description: "Manage the refactoring lifecycle between actual and desired domain models. \
                           Actions: \
                           'plan' (default) — diff actual vs desired and produce a full refactoring \
                           plan with code actions, file paths, priorities, and migration notes. \
                           'accept' — after implementing the refactoring, promote desired → actual. \
-                          'reset' — discard desired changes, revert desired → actual. \
-                          'scan' — scan the workspace source code (AST extraction) and populate \
-                          the actual model from what is really implemented. Guided by the desired \
-                          model's bounded contexts and module_path mappings."
+                          'reset' — discard desired changes, revert desired → actual."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["plan", "accept", "reset", "scan"],
+                        "enum": ["plan", "accept", "reset"],
                         "description": "Refactoring lifecycle action (default: plan)"
                     }
                 },
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "scan_model".into(),
+            description: "Scan the workspace source code (AST extraction) and populate \
+                          the actual model from what is really implemented. Guided by the \
+                          desired model's bounded contexts and module_path mappings."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
                 "required": []
             }),
         },
@@ -204,7 +213,7 @@ fn dispatch_write_tool(
             }
         }
 
-        "refactor" => {
+        "refactor_model" => {
             let action = args
                 .get("action")
                 .and_then(|v| v.as_str())
@@ -261,45 +270,45 @@ fn dispatch_write_tool(
                     }
                 }
 
-                "scan" => {
-                    use crate::domain::analyze::scan_actual_model;
+                _ => error_result(format!("Unknown action '{action}'. Use 'plan', 'accept', or 'reset'.")),
+            }
+        }
 
-                    let workspace_root = std::path::Path::new(workspace_path);
-                    let desired = store.load_desired(workspace_path).ok().flatten();
+        "scan_model" => {
+            use crate::domain::analyze::scan_actual_model;
 
-                    match scan_actual_model(workspace_root, desired.as_ref()) {
-                        Ok(actual) => {
-                            let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
-                            let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
-                            let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
-                            let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
-                            let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
+            let workspace_root = std::path::Path::new(workspace_path);
+            let desired = store.load_desired(workspace_path).ok().flatten();
 
-                            match store.save_actual(workspace_path, &actual) {
-                                Ok(()) => text_result(
-                                    json!({
-                                        "status": "scanned",
-                                        "message": format!(
-                                            "Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events. Actual model updated.",
-                                            actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count
-                                        ),
-                                        "contexts_scanned": actual.bounded_contexts.len(),
-                                        "entities": entity_count,
-                                        "value_objects": vo_count,
-                                        "services": svc_count,
-                                        "repositories": repo_count,
-                                        "events": event_count,
-                                    })
-                                    .to_string(),
+            match scan_actual_model(workspace_root, desired.as_ref()) {
+                Ok(actual) => {
+                    let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
+                    let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
+                    let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
+                    let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
+                    let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
+
+                    match store.save_actual(workspace_path, &actual) {
+                        Ok(()) => text_result(
+                            json!({
+                                "status": "scanned",
+                                "message": format!(
+                                    "Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events. Actual model updated.",
+                                    actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count
                                 ),
-                                Err(e) => error_result(format!("Scan succeeded but save failed: {e}")),
-                            }
-                        }
-                        Err(e) => error_result(format!("Scan failed: {e}")),
+                                "contexts_scanned": actual.bounded_contexts.len(),
+                                "entities": entity_count,
+                                "value_objects": vo_count,
+                                "services": svc_count,
+                                "repositories": repo_count,
+                                "events": event_count,
+                            })
+                            .to_string(),
+                        ),
+                        Err(e) => error_result(format!("Scan succeeded but save failed: {e}")),
                     }
                 }
-
-                _ => error_result(format!("Unknown action '{action}'. Use 'plan', 'accept', 'reset', or 'scan'.")),
+                Err(e) => error_result(format!("Scan failed: {e}")),
             }
         }
 
@@ -1060,7 +1069,7 @@ mod tests {
 
     #[test]
     fn test_list_write_tools_count() {
-        assert_eq!(list_write_tools().len(), 2);
+        assert_eq!(list_write_tools().len(), 3);
     }
 
     #[test]
@@ -1394,7 +1403,7 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("pending_changes"));
     }
@@ -1406,10 +1415,10 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("pending_changes"));
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("pending_changes"));
     }
@@ -1421,10 +1430,10 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        let result = call_write_tool(ws, &store, "refactor", &json!({"action": "accept"}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({"action": "accept"}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("accepted"));
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("in_sync"));
     }
@@ -1436,13 +1445,13 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Original"}),
         );
-        call_write_tool(ws, &store, "refactor", &json!({"action": "accept"}));
+        call_write_tool(ws, &store, "refactor_model", &json!({"action": "accept"}));
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Billing", "description": "New context"}),
         );
         let desired = store.load_desired(ws).unwrap().unwrap();
         assert_eq!(desired.bounded_contexts.len(), 2);
-        let result = call_write_tool(ws, &store, "refactor", &json!({"action": "reset"}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({"action": "reset"}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("reset"));
         let reset = store.load_desired(ws).unwrap().unwrap();

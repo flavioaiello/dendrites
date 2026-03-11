@@ -15,7 +15,8 @@ fn load_model(store: &Store, workspace_path: &str) -> DomainModel {
 /// List of write-tool names used to route `tools/call` to the mutable path.
 const WRITE_TOOLS: &[&str] = &[
     "set_model",
-    "refactor",
+    "refactor_model",
+    "scan_model",
 ];
 
 /// Run the MCP server over stdio (stdin/stdout), the standard transport for
@@ -310,11 +311,10 @@ mod tests {
         let names: Vec<&str> = tools.iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert!(names.contains(&"get_model"));
-        assert!(names.contains(&"model_health"));
-        assert!(names.contains(&"scrutinize"));
+        assert!(names.contains(&"show_model"));
+        assert!(names.contains(&"review_model"));
         assert!(names.contains(&"set_model"));
-        assert!(names.contains(&"refactor"));
+        assert!(names.contains(&"refactor_model"));
     }
 
     #[test]
@@ -347,11 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_call_model_health() {
+    fn test_tools_call_review_model_health() {
         let store = test_store();
         let req = make_request(
             "tools/call",
-            Some(json!({"name": "model_health", "arguments": {}})),
+            Some(json!({"name": "review_model", "arguments": {"analysis": "health"}})),
         );
         let resp = handle_request("/tmp/test-stdio", &store, &req);
         assert!(resp.error.is_none());

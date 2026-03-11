@@ -7,43 +7,39 @@ use crate::store::Store;
 pub fn list_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            name: "get_model".into(),
-            description: "Returns both the desired and actual domain models, including bounded \
+            name: "show_model".into(),
+            description: "Returns the domain model for the specified state, including bounded \
                           contexts, entities, services, events, rules, and conventions. \
-                          Shows pending changes status. \
-                          Use this before writing any new code to understand the system structure."
+                          Use 'desired' to see the target model, 'actual' to see what is \
+                          implemented. Shows pending changes status when viewing desired."
                 .into(),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["desired", "actual"],
+                        "description": "Which model state to show (default: desired)"
+                    }
+                },
                 "required": []
             }),
         },
         ToolDefinition {
-            name: "model_health".into(),
-            description: "Returns a structured health report for the domain model, computed \
-                          via Datalog inference from the CozoDB knowledge graph. Includes: \
-                          overall score (0-100), circular dependencies, layer violations, \
-                          missing invariants on aggregate roots, god contexts (>10 entities+services), \
-                          unsourced events, orphan contexts, and per-context complexity. \
-                          Use this to programmatically branch on model quality."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        },
-        ToolDefinition {
-            name: "scrutinize".into(),
+            name: "review_model".into(),
             description: "Run Datalog-based analysis queries over the domain model knowledge graph. \
-                          Supports predefined analyses (transitive_deps, circular_deps, \
-                          layer_violations, impact_analysis, aggregate_quality, dependency_graph, \
-                          field_usage, method_search, shared_fields) \
-                          and arbitrary Datalog queries. All relations have a `state` column \
-                          ('desired' | 'actual') for set-differencing. Relations: \
-                          context, context_dep, entity, service, service_dep, event, \
-                          value_object, repository, invariant, field, method, method_param, vo_rule."
+                          Supports predefined analyses: \
+                          'health' — structured health report (score 0-100, circular deps, \
+                          layer violations, missing invariants, god contexts, unsourced events, \
+                          orphan contexts, per-context complexity); \
+                          'transitive_deps', 'circular_deps', 'layer_violations', \
+                          'impact_analysis', 'aggregate_quality', 'dependency_graph', \
+                          'field_usage', 'method_search', 'shared_fields' — predefined graph queries; \
+                          'datalog' — arbitrary Datalog queries. \
+                          All relations have a `state` column ('desired' | 'actual') for \
+                          set-differencing. Relations: context, context_dep, entity, service, \
+                          service_dep, event, value_object, repository, invariant, field, method, \
+                          method_param, vo_rule."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -51,6 +47,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "analysis": {
                         "type": "string",
                         "enum": [
+                            "health",
                             "transitive_deps",
                             "circular_deps",
                             "layer_violations",
@@ -101,54 +98,79 @@ pub fn call_tool(
     args: &Value,
 ) -> ToolCallResult {
     match name {
-        "get_model" => {
+        "show_model" => {
+            let action = args.get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("desired");
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
 
-            // Build overview from Datalog relations — no in-memory DomainRegistry
-            let desired_overview = build_model_overview(store, &canonical, "desired");
-            let actual_overview = build_model_overview(store, &canonical, "actual");
+            match action {
+                "desired" => {
+                    let overview = build_model_overview(store, &canonical, "desired");
 
-            let has_actual = actual_overview.get("bounded_contexts")
-                .and_then(|v| v.as_array())
-                .is_some_and(|a| !a.is_empty());
+                    let actual_overview = build_model_overview(store, &canonical, "actual");
+                    let has_actual = actual_overview.get("bounded_contexts")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|a| !a.is_empty());
 
-            // Use pure Datalog diff for sync check
-            let (status, pending_count) = if has_actual {
-                let changes = store.diff_graph(workspace_path).ok()
-                    .and_then(|v| v.get("pending_changes").cloned())
-                    .and_then(|v| v.as_array().cloned())
-                    .unwrap_or_default();
-                if changes.is_empty() {
-                    ("in_sync", 0)
-                } else {
-                    ("pending_changes", changes.len())
+                    let (status, pending_count) = if has_actual {
+                        let changes = store.diff_graph(workspace_path).ok()
+                            .and_then(|v| v.get("pending_changes").cloned())
+                            .and_then(|v| v.as_array().cloned())
+                            .unwrap_or_default();
+                        if changes.is_empty() {
+                            ("in_sync", 0)
+                        } else {
+                            ("pending_changes", changes.len())
+                        }
+                    } else {
+                        ("no_actual", 0)
+                    };
+
+                    let result = json!({
+                        "state": "desired",
+                        "model": overview,
+                        "status": status,
+                        "pending_change_count": pending_count,
+                    });
+                    text_result(serde_json::to_string(&result).unwrap())
                 }
-            } else {
-                ("no_actual", 0)
-            };
+                "actual" => {
+                    let overview = build_model_overview(store, &canonical, "actual");
+                    let has_actual = overview.get("bounded_contexts")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|a| !a.is_empty());
 
-            let overview = json!({
-                "desired": desired_overview,
-                "actual": if has_actual { actual_overview } else { json!(null) },
-                "status": status,
-                "pending_change_count": pending_count,
-            });
-
-            text_result(serde_json::to_string(&overview).unwrap())
-        }
-
-        "model_health" => {
-            match store.model_health(workspace_path) {
-                Ok(health) => text_result(serde_json::to_string(&health).unwrap()),
-                Err(e) => error_result(format!("model_health query failed: {e}")),
+                    if !has_actual {
+                        let result = json!({
+                            "state": "actual",
+                            "model": null,
+                            "message": "No actual model exists. Run scan_model to extract it from source code."
+                        });
+                        text_result(serde_json::to_string(&result).unwrap())
+                    } else {
+                        let result = json!({
+                            "state": "actual",
+                            "model": overview,
+                        });
+                        text_result(serde_json::to_string(&result).unwrap())
+                    }
+                }
+                _ => error_result(format!("Unknown action '{action}'. Use 'desired' or 'actual'.")),
             }
         }
 
-        "scrutinize" => {
+        "review_model" => {
             let analysis = args["analysis"].as_str().unwrap_or("");
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
 
             match analysis {
+                "health" => {
+                    match store.model_health(workspace_path) {
+                        Ok(health) => text_result(serde_json::to_string(&health).unwrap()),
+                        Err(e) => error_result(format!("health analysis failed: {e}")),
+                    }
+                }
                 "transitive_deps" => {
                     let context = match args["context"].as_str() {
                         Some(c) => c,
@@ -351,7 +373,7 @@ pub fn call_tool(
                         Err(e) => error_result(format!("Shared fields query failed: {e}")),
                     }
                 }
-                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields, datalog", analysis)),
+                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: health, transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields, datalog", analysis)),
             }
         }
 
@@ -683,7 +705,7 @@ mod tests {
     #[test]
     fn test_list_tools_count() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 2);
     }
 
     #[test]
@@ -694,15 +716,24 @@ mod tests {
         // Save desired + accept to create actual
         store.save_desired(ws, &model).unwrap();
         store.accept(ws).unwrap();
-        let result = call_tool(&store, ws, "get_model", &json!({}));
+        let result = call_tool(&store, ws, "show_model", &json!({}));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
         let parsed: Value = serde_json::from_str(text).unwrap();
-        assert!(parsed.get("desired").is_some());
-        assert!(parsed.get("actual").is_some());
+        assert_eq!(parsed["state"], "desired");
+        assert!(parsed.get("model").is_some());
         assert_eq!(parsed["status"], "in_sync");
         assert_eq!(parsed["pending_change_count"], 0);
+
+        // Also verify actual action
+        let result = call_tool(&store, ws, "show_model", &json!({"action": "actual"}));
+        let text = match &result.content[0] {
+            ContentBlock::Text { text } => text,
+        };
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["state"], "actual");
+        assert!(parsed.get("model").is_some());
     }
 
     #[test]
@@ -710,13 +741,13 @@ mod tests {
         let store = test_store();
         let ws = "/tmp/test-no-actual";
         store.save_desired(ws, &test_model()).unwrap();
-        let result = call_tool(&store, ws, "get_model", &json!({}));
+        let result = call_tool(&store, ws, "show_model", &json!({"action": "actual"}));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
         let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["status"], "no_actual");
-        assert_eq!(parsed["actual"], json!(null));
+        assert_eq!(parsed["state"], "actual");
+        assert_eq!(parsed["model"], json!(null));
     }
 
     #[test]
@@ -731,7 +762,7 @@ mod tests {
         }
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "review_model", &json!({
             "analysis": "circular_deps"
         }));
         let text = match &result.content[0] {
@@ -767,7 +798,7 @@ mod tests {
         });
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "review_model", &json!({
             "analysis": "transitive_deps",
             "context": "Notifications"
         }));
@@ -789,7 +820,7 @@ mod tests {
         let model = test_model();
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "review_model", &json!({
             "analysis": "datalog",
             "query": "?[name] := *entity{workspace: $ws, name}"
         }));
@@ -808,7 +839,7 @@ mod tests {
         let model = test_model();
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "scrutinize", &json!({
+        let result = call_tool(&store, ws, "review_model", &json!({
             "analysis": "dependency_graph"
         }));
         let text = match &result.content[0] {
@@ -823,7 +854,7 @@ mod tests {
     #[test]
     fn test_query_model_missing_param() {
         let store = test_store();
-        let result = call_tool(&store, "/tmp/x", "scrutinize", &json!({
+        let result = call_tool(&store, "/tmp/x", "review_model", &json!({
             "analysis": "transitive_deps"
         }));
         assert_eq!(result.is_error, Some(true));
