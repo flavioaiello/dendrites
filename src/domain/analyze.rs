@@ -113,11 +113,19 @@ pub struct DiscoveredModule {
     pub file_path: String,
 }
 
+/// An enum discovered in the source code with its variants.
+#[derive(Debug, Clone)]
+pub struct DiscoveredEnum {
+    pub name: String,
+    /// Variants represented as Fields: name = variant ident, field_type = associated data.
+    pub variants: Vec<Field>,
+    pub file_path: String,
+}
 
-
-/// AST visitor that collects struct definitions, impl methods, and module declarations.
+/// AST visitor that collects struct definitions, enum definitions, impl methods, and module declarations.
 struct StructMethodVisitor {
     structs: Vec<DiscoveredStruct>,
+    enums: Vec<DiscoveredEnum>,
     methods: Vec<DiscoveredMethod>,
     modules: Vec<DiscoveredModule>,
     file_path: String,
@@ -217,6 +225,54 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
         syn::visit::visit_item_impl(self, node);
     }
 
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        if !is_public(&node.vis) || has_cfg_test(&node.attrs) {
+            return;
+        }
+
+        let name = node.ident.to_string();
+        let variants = node
+            .variants
+            .iter()
+            .map(|v| {
+                let variant_name = v.ident.to_string();
+                let variant_type = match &v.fields {
+                    syn::Fields::Unit => "()".to_string(),
+                    syn::Fields::Unnamed(u) => {
+                        let types: Vec<String> =
+                            u.unnamed.iter().map(|f| type_to_string(&f.ty)).collect();
+                        types.join(", ")
+                    }
+                    syn::Fields::Named(n) => {
+                        let parts: Vec<String> = n
+                            .named
+                            .iter()
+                            .filter_map(|f| {
+                                let fname = f.ident.as_ref()?.to_string();
+                                Some(format!("{}: {}", fname, type_to_string(&f.ty)))
+                            })
+                            .collect();
+                        format!("{{ {} }}", parts.join(", "))
+                    }
+                };
+                Field {
+                    name: variant_name,
+                    field_type: variant_type,
+                    required: true,
+                    description: String::new(),
+                }
+            })
+            .collect();
+
+        self.enums.push(DiscoveredEnum {
+            name,
+            variants,
+            file_path: self.file_path.clone(),
+        });
+
+        syn::visit::visit_item_enum(self, node);
+    }
+
     fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
         let name = node.ident.to_string();
         // Skip test modules — they are not domain artifacts
@@ -233,30 +289,32 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
     }
 }
 
-/// Scan a single Rust source file and extract structs, impl methods, and module declarations.
-fn scan_file(file_path: &Path, source_code: &str) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>)> {
+/// Scan a single Rust source file and extract structs, enums, impl methods, and module declarations.
+fn scan_file(file_path: &Path, source_code: &str) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredEnum>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>)> {
     let syntax_tree = syn::parse_file(source_code)
         .with_context(|| format!("Failed to parse: {}", file_path.display()))?;
 
     let mut visitor = StructMethodVisitor {
         structs: vec![],
+        enums: vec![],
         methods: vec![],
         modules: vec![],
         file_path: file_path.to_string_lossy().to_string(),
     };
     visitor.visit_file(&syntax_tree);
 
-    Ok((visitor.structs, visitor.methods, visitor.modules))
+    Ok((visitor.structs, visitor.enums, visitor.methods, visitor.modules))
 }
 
-/// Scan all `.rs` files under a directory and collect structs, methods, and modules.
-fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>)> {
+/// Scan all `.rs` files under a directory and collect structs, enums, methods, and modules.
+fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredEnum>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>)> {
     let mut all_structs = Vec::new();
+    let mut all_enums = Vec::new();
     let mut all_methods = Vec::new();
     let mut all_modules = Vec::new();
 
     if !dir.exists() {
-        return Ok((all_structs, all_methods, all_modules));
+        return Ok((all_structs, all_enums, all_methods, all_modules));
     }
 
     for entry in ignore::WalkBuilder::new(dir)
@@ -267,15 +325,16 @@ fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMe
         if path.is_file()
             && path.extension().is_some_and(|ext| ext == "rs")
             && let Ok(content) = std::fs::read_to_string(path)
-            && let Ok((structs, methods, modules)) = scan_file(path, &content)
+            && let Ok((structs, enums, methods, modules)) = scan_file(path, &content)
         {
             all_structs.extend(structs);
+            all_enums.extend(enums);
             all_methods.extend(methods);
             all_modules.extend(modules);
         }
     }
 
-    Ok((all_structs, all_methods, all_modules))
+    Ok((all_structs, all_enums, all_methods, all_modules))
 }
 
 // ─── Crate Discovery ──────────────────────────────────────────────────────
@@ -367,6 +426,27 @@ enum StructKind {
     Service,
     Repository,
     Event,
+}
+
+/// Classify an enum via naming conventions first, then variant shape.
+///
+/// Enums are most commonly ValueObjects (status codes, type discriminators).
+/// Event naming suffixes override to Event.
+fn classify_enum(name: &str) -> StructKind {
+    let upper = name.to_uppercase();
+
+    if upper.ends_with("EVENT")
+        || upper.ends_with("CREATED")
+        || upper.ends_with("UPDATED")
+        || upper.ends_with("DELETED")
+        || upper.ends_with("CHANGED")
+        || upper.ends_with("OCCURRED")
+    {
+        return StructKind::Event;
+    }
+
+    // Enums are natural value objects — closed set of named values
+    StructKind::ValueObject
 }
 
 /// Classify a struct via naming conventions first, then structural heuristics.
@@ -520,7 +600,7 @@ pub fn scan_actual_model(
 
         // 3. For each discovered context, scan and classify
         for (ctx_name, scan_dir, module_path) in &module_dirs {
-            let (structs, methods, discovered_modules) = scan_directory(scan_dir)?;
+            let (structs, enums, methods, discovered_modules) = scan_directory(scan_dir)?;
 
             // Resolve matching desired bounded context (by name or module_path)
             let desired_bc = desired.and_then(|d| {
@@ -656,6 +736,95 @@ pub fn scan_actual_model(
                 }
             }
 
+            // ── Classify discovered enums ──
+            for discovered in &enums {
+                let name = &discovered.name;
+
+                // Collect public methods for this enum (from impl blocks)
+                let enum_methods: Vec<Method> = methods
+                    .iter()
+                    .filter(|m| m.owner == *name)
+                    .map(|m| Method {
+                        name: m.name.clone(),
+                        description: String::new(),
+                        parameters: m.parameters.clone(),
+                        return_type: m.return_type.clone(),
+                    })
+                    .collect();
+
+                // Check desired model for explicit classification
+                let desired_kind = desired_bc.and_then(|dbc| {
+                    if dbc.entities.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Entity)
+                    } else if dbc.value_objects.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::ValueObject)
+                    } else if dbc.services.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Service)
+                    } else if dbc.events.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Event)
+                    } else {
+                        None
+                    }
+                });
+
+                let kind = desired_kind.unwrap_or_else(|| classify_enum(name));
+
+                match kind {
+                    StructKind::Entity => {
+                        let desired_ent = desired_bc
+                            .and_then(|dbc| dbc.entities.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        bc.entities.push(Entity {
+                            name: name.clone(),
+                            description: desired_ent.map_or(String::new(), |e| e.description.clone()),
+                            aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
+                            fields: discovered.variants.clone(),
+                            methods: enum_methods,
+                            invariants: desired_ent.map_or(vec![], |e| e.invariants.clone()),
+                        });
+                    }
+                    StructKind::ValueObject => {
+                        let desired_vo = desired_bc
+                            .and_then(|dbc| dbc.value_objects.iter().find(|v| v.name.eq_ignore_ascii_case(name)));
+                        bc.value_objects.push(ValueObject {
+                            name: name.clone(),
+                            description: desired_vo.map_or(String::new(), |v| v.description.clone()),
+                            fields: discovered.variants.clone(),
+                            validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
+                        });
+                    }
+                    StructKind::Service => {
+                        let desired_svc = desired_bc
+                            .and_then(|dbc| dbc.services.iter().find(|s| s.name.eq_ignore_ascii_case(name)));
+                        bc.services.push(Service {
+                            name: name.clone(),
+                            description: desired_svc.map_or(String::new(), |s| s.description.clone()),
+                            kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
+                            methods: enum_methods,
+                            dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
+                        });
+                    }
+                    StructKind::Repository => {
+                        let desired_repo = desired_bc
+                            .and_then(|dbc| dbc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name)));
+                        bc.repositories.push(Repository {
+                            name: name.clone(),
+                            aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
+                            methods: enum_methods,
+                        });
+                    }
+                    StructKind::Event => {
+                        let desired_evt = desired_bc
+                            .and_then(|dbc| dbc.events.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        bc.events.push(DomainEvent {
+                            name: name.clone(),
+                            description: desired_evt.map_or(String::new(), |e| e.description.clone()),
+                            fields: discovered.variants.clone(),
+                            source: desired_evt.map_or(String::new(), |e| e.source.clone()),
+                        });
+                    }
+                }
+            }
+
             actual.bounded_contexts.push(bc);
         }
     }
@@ -770,7 +939,7 @@ mod tests {
                 pub age: u32,
             }
         "#;
-        let (structs, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "User");
         assert_eq!(structs[0].fields.len(), 3);
@@ -789,7 +958,7 @@ mod tests {
                 fn private_helper(&self) {} // should be ignored
             }
         "#;
-        let (structs, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(methods.len(), 2); // only public methods
         assert_eq!(methods[0].owner, "Store");
@@ -805,7 +974,7 @@ mod tests {
             struct PrivateStruct { x: i32 }
             pub struct PublicStruct { pub y: i32 }
         "#;
-        let (structs, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "PublicStruct");
     }
@@ -823,9 +992,69 @@ mod tests {
                 }
             }
         "#;
-        let (_, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (_, _, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(methods.len(), 1); // only inherent impl
         assert_eq!(methods[0].name, "bar");
+    }
+
+    #[test]
+    fn test_scan_file_enum_variants() {
+        let code = r#"
+            pub enum OrderStatus {
+                Pending,
+                Processing,
+                Shipped,
+                Delivered,
+            }
+        "#;
+        let (_, enums, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        assert_eq!(enums.len(), 1);
+        assert_eq!(enums[0].name, "OrderStatus");
+        assert_eq!(enums[0].variants.len(), 4);
+        assert_eq!(enums[0].variants[0].name, "Pending");
+        assert_eq!(enums[0].variants[0].field_type, "()");
+        assert_eq!(enums[0].variants[3].name, "Delivered");
+    }
+
+    #[test]
+    fn test_scan_file_enum_data_variants() {
+        let code = r#"
+            pub enum PaymentEvent {
+                Created { amount: u64, currency: String },
+                Failed(String),
+                Refunded,
+            }
+        "#;
+        let (_, enums, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        assert_eq!(enums.len(), 1);
+        assert_eq!(enums[0].name, "PaymentEvent");
+        assert_eq!(enums[0].variants.len(), 3);
+        assert_eq!(enums[0].variants[0].name, "Created");
+        assert_eq!(enums[0].variants[0].field_type, "{ amount: u64, currency: String }");
+        assert_eq!(enums[0].variants[1].name, "Failed");
+        assert_eq!(enums[0].variants[1].field_type, "String");
+        assert_eq!(enums[0].variants[2].name, "Refunded");
+        assert_eq!(enums[0].variants[2].field_type, "()");
+    }
+
+    #[test]
+    fn test_scan_file_skips_private_enums() {
+        let code = r#"
+            enum PrivateEnum { A, B }
+            pub enum PublicEnum { X, Y }
+        "#;
+        let (_, enums, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        assert_eq!(enums.len(), 1);
+        assert_eq!(enums[0].name, "PublicEnum");
+    }
+
+    #[test]
+    fn test_classify_enum_naming() {
+        assert_eq!(classify_enum("OrderStatus"), StructKind::ValueObject);
+        assert_eq!(classify_enum("PaymentMethod"), StructKind::ValueObject);
+        assert_eq!(classify_enum("OrderCreated"), StructKind::Event);
+        assert_eq!(classify_enum("UserDeletedEvent"), StructKind::Event);
+        assert_eq!(classify_enum("StatusChanged"), StructKind::Event);
     }
 
     #[test]
@@ -1045,6 +1274,63 @@ impl User {
         assert_eq!(bc.value_objects[0].fields.len(), 1);
 
         // Cleanup
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_scan_actual_model_discovers_enums() {
+        use std::env::temp_dir;
+        use std::fs;
+
+        let tmp = temp_dir().join(format!("dendrites_enum_test_{}", std::process::id()));
+        let src = tmp.join("src").join("order");
+        fs::create_dir_all(&src).unwrap();
+
+        fs::write(
+            src.join("types.rs"),
+            r#"
+pub enum OrderStatus {
+    Pending,
+    Confirmed,
+    Shipped,
+    Delivered,
+}
+
+pub enum OrderCreated {
+    Online { order_id: u64 },
+    InStore(u64),
+}
+
+pub struct Order {
+    pub id: u64,
+    pub status: OrderStatus,
+}
+
+impl Order {
+    pub fn confirm(&self) {}
+}
+"#,
+        )
+        .unwrap();
+
+        let actual = scan_actual_model(&tmp, None).unwrap();
+        assert_eq!(actual.bounded_contexts.len(), 1);
+        let bc = &actual.bounded_contexts[0];
+        assert_eq!(bc.name, "order");
+
+        // OrderStatus: enum, no event suffix → ValueObject
+        assert!(bc.value_objects.iter().any(|v| v.name == "OrderStatus"));
+        let status = bc.value_objects.iter().find(|v| v.name == "OrderStatus").unwrap();
+        assert_eq!(status.fields.len(), 4);
+
+        // OrderCreated: enum with event suffix → Event
+        assert!(bc.events.iter().any(|e| e.name == "OrderCreated"));
+        let evt = bc.events.iter().find(|e| e.name == "OrderCreated").unwrap();
+        assert_eq!(evt.fields.len(), 2);
+
+        // Order: struct with fields + methods → Entity
+        assert!(bc.entities.iter().any(|e| e.name == "Order"));
+
         let _ = fs::remove_dir_all(&tmp);
     }
 }
