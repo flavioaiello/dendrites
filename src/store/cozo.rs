@@ -114,6 +114,8 @@ impl Store {
             ":create vo_rule { workspace: String, context: String, value_object: String, idx: Int, state: String => text: String }",
             // Ephemeral — no state column
             ":create live_import { workspace: String, from_file: String, to_module: String }",
+            // Module declarations within bounded contexts
+            ":create module { workspace: String, context: String, name: String, state: String => path: String default '', public: Bool default false, file_path: String default '', description: String default '' }",
         ];
 
         for schema in schemas {
@@ -860,6 +862,24 @@ impl Store {
                 ).map_err(|e| anyhow::anyhow!("save repository '{}': {:?}", repo.name, e))?;
                 self.save_methods(workspace, &bc.name, "repository", &repo.name, &repo.methods, state)?;
             }
+
+            for module in &bc.modules {
+                let mut params = params_map(&[
+                    ("ws", workspace),
+                    ("ctx", &bc.name),
+                    ("name", &module.name),
+                    ("st", state),
+                    ("path", &module.path),
+                    ("fp", &module.file_path),
+                    ("desc", &module.description),
+                ]);
+                params.insert("public".into(), cozo::DataValue::Bool(module.public));
+                self.db.run_script(
+                    "?[workspace, context, name, state, path, public, file_path, description] <- [[$ws, $ctx, $name, $st, $path, $public, $fp, $desc]] :put module { workspace, context, name, state => path, public, file_path, description }",
+                    params,
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save module '{}': {:?}", module.name, e))?;
+            }
         }
 
         for system in &model.external_systems {
@@ -929,6 +949,7 @@ impl Store {
             ("event", "workspace, context, name, state"),
             ("value_object", "workspace, context, name, state"),
             ("repository", "workspace, context, name, state"),
+            ("module", "workspace, context, name, state"),
             ("external_system", "workspace, name, state"),
             ("external_system_context", "workspace, system, context, idx, state"),
             ("architectural_decision", "workspace, id, state"),
@@ -1053,6 +1074,10 @@ impl Store {
             "src[ws, c, vo, i, t] := *vo_rule{workspace: ws, context: c, value_object: vo, idx: i, state: $from, text: t}, ws = $ws \
              ?[workspace, context, value_object, idx, state, text] := src[workspace, context, value_object, idx, text], state = $to \
              :put vo_rule {workspace, context, value_object, idx, state => text}",
+            // module
+            "src[ws, c, n, p, pub_flag, fp, desc] := *module{workspace: ws, context: c, name: n, state: $from, path: p, public: pub_flag, file_path: fp, description: desc}, ws = $ws \
+             ?[workspace, context, name, state, path, public, file_path, description] := src[workspace, context, name, path, public, file_path, description], state = $to \
+             :put module {workspace, context, name, state => path, public, file_path, description}",
         ];
 
         for script in scripts {
@@ -1389,6 +1414,29 @@ impl Store {
                 })
                 .collect();
 
+            // Modules
+            let mods = self
+                .db
+                .run_script(
+                    "?[name, path, public, file_path, description] := \
+                        *module{workspace: $ws, context: $ctx, name, state: $st, \
+                                path, public, file_path, description}",
+                    params_map(&[("ws", &ws), ("ctx", &ctx_name), ("st", state)]),
+                    ScriptMutability::Immutable,
+                )
+                .map(|r| r.rows)
+                .unwrap_or_default();
+            let modules: Vec<Module> = mods
+                .iter()
+                .map(|r| Module {
+                    name: dv_str(&r[0]),
+                    path: dv_str(&r[1]),
+                    public: matches!(&r[2], cozo::DataValue::Bool(true)),
+                    file_path: dv_str(&r[3]),
+                    description: dv_str(&r[4]),
+                })
+                .collect();
+
             bounded_contexts.push(BoundedContext {
                 name: ctx_name,
                 description: dv_str(&row[1]),
@@ -1397,6 +1445,7 @@ impl Store {
                 aggregates,
                 policies,
                 read_models,
+                modules,
                 entities,
                 value_objects,
                 services,
@@ -2606,6 +2655,7 @@ mod tests {
                     aggregates: vec![],
                     policies: vec![],
                     read_models: vec![],
+                    modules: vec![],
                     entities: vec![Entity {
                         name: "User".into(),
                         description: "A user".into(),
@@ -2639,6 +2689,7 @@ mod tests {
                     aggregates: vec![],
                     policies: vec![],
                     read_models: vec![],
+                    modules: vec![],
                     entities: vec![Entity {
                         name: "Subscription".into(),
                         description: "A subscription".into(),
@@ -2681,6 +2732,7 @@ mod tests {
                 aggregates: vec![],
                 policies: vec![],
                 read_models: vec![],
+                modules: vec![],
                 entities: vec![Entity {
                     name: "Product".into(),
                     description: "A product".into(),
@@ -3151,6 +3203,7 @@ mod tests {
             aggregates: vec![],
             policies: vec![],
             read_models: vec![],
+            modules: vec![],
             entities: vec![],
             value_objects: vec![],
             services: vec![],

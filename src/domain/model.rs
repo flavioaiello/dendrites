@@ -129,6 +129,8 @@ pub struct BoundedContext {
     #[serde(default)]
     pub read_models: Vec<ReadModel>,
     #[serde(default)]
+    pub modules: Vec<Module>,
+    #[serde(default)]
     pub entities: Vec<Entity>,
     #[serde(default)]
     pub value_objects: Vec<ValueObject>,
@@ -199,6 +201,25 @@ pub struct ReadModel {
     pub fields: Vec<Field>,
     #[serde(default)]
     pub ownership: Ownership,
+}
+
+// ─── Module ────────────────────────────────────────────────────────────────
+
+/// A discovered or declared Rust module within a bounded context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Module {
+    pub name: String,
+    /// Fully-qualified module path (e.g., "domain::model")
+    #[serde(default)]
+    pub path: String,
+    /// Whether the module is declared as `pub mod`
+    #[serde(default)]
+    pub public: bool,
+    /// Source file where the module is declared
+    #[serde(default)]
+    pub file_path: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 // ─── Entity ────────────────────────────────────────────────────────────────

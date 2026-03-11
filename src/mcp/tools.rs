@@ -26,65 +26,23 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "review_model".into(),
-            description: "Run Datalog-based analysis queries over the domain model knowledge graph. \
-                          Supports predefined analyses: \
-                          'health' — structured health report (score 0-100, circular deps, \
-                          layer violations, missing invariants, god contexts, unsourced events, \
-                          orphan contexts, per-context complexity); \
-                          'transitive_deps', 'circular_deps', 'layer_violations', \
-                          'impact_analysis', 'aggregate_quality', 'dependency_graph', \
-                          'field_usage', 'method_search', 'shared_fields' — predefined graph queries; \
-                          'datalog' — arbitrary Datalog queries. \
+            name: "query_model".into(),
+            description: "Run an arbitrary Datalog query over the domain model knowledge graph. \
                           All relations have a `state` column ('desired' | 'actual') for \
-                          set-differencing. Relations: context, context_dep, entity, service, \
-                          service_dep, event, value_object, repository, invariant, field, method, \
-                          method_param, vo_rule."
+                          set-differencing. Use $ws to reference the current workspace. \
+                          Relations: context, context_dep, entity, service, service_dep, event, \
+                          value_object, repository, invariant, field, method, method_param, vo_rule."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "analysis": {
-                        "type": "string",
-                        "enum": [
-                            "health",
-                            "transitive_deps",
-                            "circular_deps",
-                            "layer_violations",
-                            "impact_analysis",
-                            "aggregate_quality",
-                            "dependency_graph",
-                            "field_usage",
-                            "method_search",
-                            "shared_fields",
-                            "datalog"
-                        ],
-                        "description": "Type of analysis to run"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Bounded context name (required for transitive_deps, impact_analysis)"
-                    },
-                    "entity": {
-                        "type": "string",
-                        "description": "Entity name (required for impact_analysis)"
-                    },
-                    "field_type": {
-                        "type": "string",
-                        "description": "Field type to search for (required for field_usage)"
-                    },
-                    "method_name": {
-                        "type": "string",
-                        "description": "Method name to search for (required for method_search)"
-                    },
                     "query": {
                         "type": "string",
-                        "description": "Custom Datalog query (required for analysis=datalog). \
-                                        Use $ws to reference the current workspace. \
+                        "description": "Datalog query. Use $ws to reference the current workspace. \
                                         Example: ?[name] := *entity{workspace: $ws, name}"
                     }
                 },
-                "required": ["analysis"]
+                "required": ["query"]
             }),
         },
     ]
@@ -160,220 +118,19 @@ pub fn call_tool(
             }
         }
 
-        "review_model" => {
-            let analysis = args["analysis"].as_str().unwrap_or("");
+        "query_model" => {
+            let query = match args["query"].as_str() {
+                Some(q) => q,
+                None => return error_result("'query' parameter is required".into()),
+            };
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
-
-            match analysis {
-                "health" => {
-                    match store.model_health(workspace_path) {
-                        Ok(health) => text_result(serde_json::to_string(&health).unwrap()),
-                        Err(e) => error_result(format!("health analysis failed: {e}")),
-                    }
-                }
-                "transitive_deps" => {
-                    let context = match args["context"].as_str() {
-                        Some(c) => c,
-                        None => return error_result("'context' parameter is required for transitive_deps".into()),
-                    };
-                    match store.transitive_deps(&canonical, context) {
-                        Ok(deps) => text_result(json!({
-                            "analysis": "transitive_deps",
-                            "context": context,
-                            "dependencies": deps,
-                            "count": deps.len(),
-                        }).to_string()),
-                        Err(e) => error_result(format!("Transitive deps query failed: {}", e)),
-                    }
-                }
-                "circular_deps" => {
-                    match store.circular_deps(&canonical) {
-                        Ok(cycles) => {
-                            let cycle_pairs: Vec<_> = cycles.iter()
-                                .map(|(a, b)| json!({"from": a, "to": b}))
-                                .collect();
-                            text_result(json!({
-                                "analysis": "circular_deps",
-                                "cycles": cycle_pairs,
-                                "has_cycles": !cycles.is_empty(),
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Circular deps query failed: {}", e)),
-                    }
-                }
-                "layer_violations" => {
-                    match store.layer_violations(&canonical) {
-                        Ok(violations) => {
-                            let items: Vec<_> = violations.iter()
-                                .map(|(ctx, svc, dep)| json!({
-                                    "context": ctx,
-                                    "domain_service": svc,
-                                    "infrastructure_dependency": dep,
-                                }))
-                                .collect();
-                            text_result(json!({
-                                "analysis": "layer_violations",
-                                "violations": items,
-                                "count": violations.len(),
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Layer violations query failed: {}", e)),
-                    }
-                }
-                "impact_analysis" => {
-                    let context = match args["context"].as_str() {
-                        Some(c) => c,
-                        None => return error_result("'context' parameter is required for impact_analysis".into()),
-                    };
-                    let entity = match args["entity"].as_str() {
-                        Some(e) => e,
-                        None => return error_result("'entity' parameter is required for impact_analysis".into()),
-                    };
-                    match store.impact_analysis(&canonical, context, entity) {
-                        Ok(result) => text_result(json!({
-                            "analysis": "impact_analysis",
-                            "result": result,
-                        }).to_string()),
-                        Err(e) => error_result(format!("Impact analysis query failed: {}", e)),
-                    }
-                }
-                "aggregate_quality" => {
-                    match store.aggregate_roots_without_invariants(&canonical) {
-                        Ok(roots) => {
-                            let items: Vec<_> = roots.iter()
-                                .map(|(ctx, ent)| json!({"context": ctx, "entity": ent}))
-                                .collect();
-                            text_result(json!({
-                                "analysis": "aggregate_quality",
-                                "aggregate_roots_without_invariants": items,
-                                "count": roots.len(),
-                                "recommendation": if roots.is_empty() {
-                                    "All aggregate roots have invariants defined."
-                                } else {
-                                    "Consider adding domain invariants to protect these aggregate roots."
-                                },
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Aggregate quality query failed: {}", e)),
-                    }
-                }
-                "dependency_graph" => {
-                    match store.dependency_graph(&canonical) {
-                        Ok(graph) => text_result(json!({
-                            "analysis": "dependency_graph",
-                            "graph": graph,
-                        }).to_string()),
-                        Err(e) => error_result(format!("Dependency graph query failed: {}", e)),
-                    }
-                }
-                "datalog" => {
-                    let query = match args["query"].as_str() {
-                        Some(q) => q,
-                        None => return error_result("'query' parameter is required for datalog analysis".into()),
-                    };
-                    match store.run_datalog_full(query, &canonical) {
-                        Ok((headers, rows)) => text_result(json!({
-                            "analysis": "datalog",
-                            "headers": headers,
-                            "rows": rows,
-                            "row_count": rows.len(),
-                        }).to_string()),
-                        Err(e) => error_result(format!("Datalog query failed: {}", e)),
-                    }
-                }
-                "field_usage" => {
-                    let field_type = match args["field_type"].as_str() {
-                        Some(t) => t,
-                        None => return error_result("'field_type' parameter is required for field_usage".into()),
-                    };
-                    match store.run_datalog(
-                        &format!(
-                            "?[ctx, owner_kind, owner, field_name] := \
-                                *field{{workspace: $ws, context: ctx, owner_kind, owner, \
-                                       name: field_name, field_type: '{}', state: 'desired'}}",
-                            field_type.replace('\''  , "''")
-                        ),
-                        &canonical,
-                    ) {
-                        Ok(rows) => {
-                            let items: Vec<_> = rows.iter().map(|r| json!({
-                                "context": r[0], "owner_kind": r[1],
-                                "owner": r[2], "field": r[3],
-                            })).collect();
-                            text_result(json!({
-                                "analysis": "field_usage",
-                                "field_type": field_type,
-                                "usages": items,
-                                "count": items.len(),
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Field usage query failed: {e}")),
-                    }
-                }
-                "method_search" => {
-                    let method_name = match args["method_name"].as_str() {
-                        Some(n) => n,
-                        None => return error_result("'method_name' parameter is required for method_search".into()),
-                    };
-                    match store.run_datalog(
-                        &format!(
-                            "?[ctx, owner_kind, owner, return_type] := \
-                                *method{{workspace: $ws, context: ctx, owner_kind, owner, \
-                                        name: '{}', state: 'desired', return_type}}",
-                            method_name.replace('\'', "''")
-                        ),
-                        &canonical,
-                    ) {
-                        Ok(rows) => {
-                            let items: Vec<_> = rows.iter().map(|r| json!({
-                                "context": r[0], "owner_kind": r[1],
-                                "owner": r[2], "return_type": r[3],
-                            })).collect();
-                            text_result(json!({
-                                "analysis": "method_search",
-                                "method_name": method_name,
-                                "matches": items,
-                                "count": items.len(),
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Method search query failed: {e}")),
-                    }
-                }
-                "shared_fields" => {
-                    // Find field names shared between entities and events
-                    // (potential event-sourcing alignment opportunities)
-                    match store.run_datalog(
-                        "entity_field[ctx, owner, name, ft] := \
-                            *field{workspace: $ws, context: ctx, owner_kind: 'entity', \
-                                   owner, name, field_type: ft, state: 'desired'} \
-                         event_field[ctx, owner, name, ft] := \
-                            *field{workspace: $ws, context: ctx, owner_kind: 'event', \
-                                   owner, name, field_type: ft, state: 'desired'} \
-                         ?[ctx, entity, event, field_name, field_type] := \
-                            entity_field[ctx, entity, field_name, field_type], \
-                            event_field[ctx, event, field_name, field_type]",
-                        &canonical,
-                    ) {
-                        Ok(rows) => {
-                            let items: Vec<_> = rows.iter().map(|r| json!({
-                                "context": r[0], "entity": r[1],
-                                "event": r[2], "field": r[3], "type": r[4],
-                            })).collect();
-                            text_result(json!({
-                                "analysis": "shared_fields",
-                                "shared": items,
-                                "count": items.len(),
-                                "insight": if items.is_empty() {
-                                    "No shared fields between entities and events."
-                                } else {
-                                    "Shared fields suggest event-sourcing alignment. Events carry entity state."
-                                }
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Shared fields query failed: {e}")),
-                    }
-                }
-                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: health, transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields, datalog", analysis)),
+            match store.run_datalog_full(query, &canonical) {
+                Ok((headers, rows)) => text_result(json!({
+                    "headers": headers,
+                    "rows": rows,
+                    "row_count": rows.len(),
+                }).to_string()),
+                Err(e) => error_result(format!("Datalog query failed: {e}")),
             }
         }
 
@@ -634,6 +391,7 @@ mod tests {
                     aggregates: vec![],
                     policies: vec![],
                     read_models: vec![],
+                    modules: vec![],
                     entities: vec![Entity {
                         name: "User".into(),
                         description: "A user".into(),
@@ -667,6 +425,7 @@ mod tests {
                     aggregates: vec![],
                     policies: vec![],
                     read_models: vec![],
+                    modules: vec![],
                     entities: vec![],
                     value_objects: vec![],
                     services: vec![],
@@ -755,22 +514,19 @@ mod tests {
         let store = test_store();
         let ws = "/tmp/test-query-circular";
         let mut model = test_model();
-        // Create circular dependency: Identity → Billing → Identity
-        // Billing already depends on Identity; add Identity → Billing
         if let Some(identity) = model.bounded_contexts.iter_mut().find(|c| c.name == "Identity") {
             identity.dependencies.push("Billing".into());
         }
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "review_model", &json!({
-            "analysis": "circular_deps"
+        let result = call_tool(&store, ws, "query_model", &json!({
+            "query": "?[a, b] := *context_dep{workspace: $ws, from_ctx: a, to_ctx: b, state: 'desired'}, *context_dep{workspace: $ws, from_ctx: b, to_ctx: a, state: 'desired'}"
         }));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
         let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "circular_deps");
-        assert_eq!(parsed["has_cycles"], true);
+        assert!(parsed["row_count"].as_u64().unwrap() > 0);
     }
 
     #[test]
@@ -778,9 +534,6 @@ mod tests {
         let store = test_store();
         let ws = "/tmp/test-query-trans";
         let mut model = test_model();
-        // Add Notifications context depending on Billing
-        // Billing already depends on Identity, so transitive from Billing: Identity
-        // Then Notifications depends on Billing, so from Notifications: Billing, Identity
         model.bounded_contexts.push(BoundedContext {
             name: "Notifications".into(),
             description: "".into(),
@@ -789,6 +542,7 @@ mod tests {
             aggregates: vec![],
             policies: vec![],
             read_models: vec![],
+            modules: vec![],
             entities: vec![],
             value_objects: vec![],
             services: vec![],
@@ -798,19 +552,14 @@ mod tests {
         });
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "review_model", &json!({
-            "analysis": "transitive_deps",
-            "context": "Notifications"
+        let result = call_tool(&store, ws, "query_model", &json!({
+            "query": "?[to_ctx] := *context_dep{workspace: $ws, from_ctx: 'Notifications', to_ctx, state: 'desired'}"
         }));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
         let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "transitive_deps");
-        // Notifications → Billing → Identity (transitive)
-        let deps = parsed["dependencies"].as_array().unwrap();
-        assert!(deps.contains(&json!("Billing")));
-        assert!(deps.contains(&json!("Identity")));
+        assert!(parsed["row_count"].as_u64().unwrap() > 0);
     }
 
     #[test]
@@ -820,15 +569,13 @@ mod tests {
         let model = test_model();
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "review_model", &json!({
-            "analysis": "datalog",
+        let result = call_tool(&store, ws, "query_model", &json!({
             "query": "?[name] := *entity{workspace: $ws, name}"
         }));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
         let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "datalog");
         assert!(parsed["row_count"].as_u64().unwrap() > 0);
     }
 
@@ -839,24 +586,20 @@ mod tests {
         let model = test_model();
         store.save_desired(ws, &model).unwrap();
 
-        let result = call_tool(&store, ws, "review_model", &json!({
-            "analysis": "dependency_graph"
+        let result = call_tool(&store, ws, "query_model", &json!({
+            "query": "?[from_ctx, to_ctx] := *context_dep{workspace: $ws, from_ctx, to_ctx, state: 'desired'}"
         }));
         let text = match &result.content[0] {
             ContentBlock::Text { text } => text,
         };
         let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "dependency_graph");
-        assert!(parsed["graph"].get("nodes").is_some());
-        assert!(parsed["graph"].get("edges").is_some());
+        assert!(parsed["row_count"].as_u64().unwrap() > 0);
     }
 
     #[test]
     fn test_query_model_missing_param() {
         let store = test_store();
-        let result = call_tool(&store, "/tmp/x", "review_model", &json!({
-            "analysis": "transitive_deps"
-        }));
+        let result = call_tool(&store, "/tmp/x", "query_model", &json!({}));
         assert_eq!(result.is_error, Some(true));
     }
 }

@@ -49,6 +49,7 @@ fn ecommerce_model() -> DomainModel {
                 aggregates: vec![],
                 policies: vec![],
                 read_models: vec![],
+                modules: vec![],
                 entities: vec![
                     Entity {
                         name: "Product".into(),
@@ -159,6 +160,7 @@ fn ecommerce_model() -> DomainModel {
                 aggregates: vec![],
                 policies: vec![],
                 read_models: vec![],
+                modules: vec![],
                 entities: vec![
                     Entity {
                         name: "Order".into(),
@@ -753,6 +755,7 @@ fn perf_scale_10_contexts() {
             aggregates: vec![],
             policies: vec![],
             read_models: vec![],
+            modules: vec![],
             entities,
             value_objects: vec![],
             services: vec![],

@@ -18,27 +18,30 @@ struct ImportVisitor {
 
 impl<'ast> Visit<'ast> for ImportVisitor {
     fn visit_use_tree(&mut self, node: &'ast syn::UseTree) {
-        // Very basic extraction: turn use trees into string paths
         fn extract_paths(tree: &syn::UseTree, prefix: &str) -> Vec<String> {
+            let join = |suffix: &str| {
+                if prefix.is_empty() {
+                    suffix.to_string()
+                } else {
+                    format!("{}::{}", prefix, suffix)
+                }
+            };
             match tree {
-                syn::UseTree::Path(path) => extract_paths(
-                    &path.tree,
-                    &format!("{}{}{}::", prefix, if prefix.is_empty() { "" } else { "::" }, path.ident),
-                ),
-                syn::UseTree::Name(name) => vec![format!("{}{}", prefix, name.ident)],
-                syn::UseTree::Rename(rename) => vec![format!("{}{}", prefix, rename.ident)],
-                syn::UseTree::Glob(_) => vec![format!("{}*", prefix)],
-                syn::UseTree::Group(group) => {
-                    let mut paths = vec![];
-                    for item in &group.items {
-                        paths.extend(extract_paths(item, prefix));
-                    }
-                    paths
+                syn::UseTree::Path(p) => {
+                    extract_paths(&p.tree, &join(&p.ident.to_string()))
+                }
+                syn::UseTree::Name(n) => vec![join(&n.ident.to_string())],
+                syn::UseTree::Rename(r) => vec![join(&r.ident.to_string())],
+                syn::UseTree::Glob(_) => vec![join("*")],
+                syn::UseTree::Group(g) => {
+                    g.items.iter().flat_map(|i| extract_paths(i, prefix)).collect()
                 }
             }
         }
         self.imports.extend(extract_paths(node, ""));
-        syn::visit::visit_use_tree(self, node);
+        // No syn::visit delegation — extract_paths already recurses the tree.
+        // Delegating would re-trigger visit_use_tree at each nesting level,
+        // producing duplicate intermediate entries.
     }
 }
 
@@ -102,26 +105,28 @@ pub struct DiscoveredMethod {
     pub file_path: String,
 }
 
-/// Everything discovered in source files under a single bounded context's module path.
+/// A module declaration discovered in the AST.
 #[derive(Debug, Clone)]
-pub struct ContextScan {
-    pub context_name: String,
-    pub module_path: String,
-    pub structs: Vec<DiscoveredStruct>,
-    pub methods: Vec<DiscoveredMethod>,
+pub struct DiscoveredModule {
+    pub name: String,
+    pub public: bool,
+    pub file_path: String,
 }
 
-/// AST visitor that collects struct definitions and impl methods.
+
+
+/// AST visitor that collects struct definitions, impl methods, and module declarations.
 struct StructMethodVisitor {
     structs: Vec<DiscoveredStruct>,
     methods: Vec<DiscoveredMethod>,
+    modules: Vec<DiscoveredModule>,
     file_path: String,
 }
 
 impl<'ast> Visit<'ast> for StructMethodVisitor {
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
-        // Skip private, test, or #[cfg(test)] structs
-        if !is_public(&node.vis) {
+        // Skip private or #[cfg(test)] structs
+        if !is_public(&node.vis) || has_cfg_test(&node.attrs) {
             return;
         }
 
@@ -131,6 +136,10 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
                 .named
                 .iter()
                 .filter_map(|f| {
+                    // Only collect pub fields — private fields are not part of the domain API
+                    if !is_public(&f.vis) {
+                        return None;
+                    }
                     let field_name = f.ident.as_ref()?.to_string();
                     let field_type = type_to_string(&f.ty);
                     Some(Field {
@@ -154,8 +163,8 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        // Only inherent impls, not trait impls
-        if node.trait_.is_some() {
+        // Only inherent impls, not trait impls; skip #[cfg(test)] impls
+        if node.trait_.is_some() || has_cfg_test(&node.attrs) {
             return;
         }
 
@@ -207,30 +216,47 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
 
         syn::visit::visit_item_impl(self, node);
     }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let name = node.ident.to_string();
+        // Skip test modules — they are not domain artifacts
+        if name == "tests" || has_cfg_test(&node.attrs) {
+            return;
+        }
+        self.modules.push(DiscoveredModule {
+            name,
+            public: is_public(&node.vis),
+            file_path: self.file_path.clone(),
+        });
+        // Visit children so nested inline modules are also discovered
+        syn::visit::visit_item_mod(self, node);
+    }
 }
 
-/// Scan a single Rust source file and extract structs + impl methods.
-fn scan_file(file_path: &Path, source_code: &str) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)> {
+/// Scan a single Rust source file and extract structs, impl methods, and module declarations.
+fn scan_file(file_path: &Path, source_code: &str) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>)> {
     let syntax_tree = syn::parse_file(source_code)
         .with_context(|| format!("Failed to parse: {}", file_path.display()))?;
 
     let mut visitor = StructMethodVisitor {
         structs: vec![],
         methods: vec![],
+        modules: vec![],
         file_path: file_path.to_string_lossy().to_string(),
     };
     visitor.visit_file(&syntax_tree);
 
-    Ok((visitor.structs, visitor.methods))
+    Ok((visitor.structs, visitor.methods, visitor.modules))
 }
 
-/// Scan all `.rs` files under a directory and collect structs + methods.
-fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)> {
+/// Scan all `.rs` files under a directory and collect structs, methods, and modules.
+fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>)> {
     let mut all_structs = Vec::new();
     let mut all_methods = Vec::new();
+    let mut all_modules = Vec::new();
 
     if !dir.exists() {
-        return Ok((all_structs, all_methods));
+        return Ok((all_structs, all_methods, all_modules));
     }
 
     for entry in ignore::WalkBuilder::new(dir)
@@ -241,14 +267,15 @@ fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMe
         if path.is_file()
             && path.extension().is_some_and(|ext| ext == "rs")
             && let Ok(content) = std::fs::read_to_string(path)
-            && let Ok((structs, methods)) = scan_file(path, &content)
+            && let Ok((structs, methods, modules)) = scan_file(path, &content)
         {
             all_structs.extend(structs);
             all_methods.extend(methods);
+            all_modules.extend(modules);
         }
     }
 
-    Ok((all_structs, all_methods))
+    Ok((all_structs, all_methods, all_modules))
 }
 
 // ─── Crate Discovery ──────────────────────────────────────────────────────
@@ -493,7 +520,7 @@ pub fn scan_actual_model(
 
         // 3. For each discovered context, scan and classify
         for (ctx_name, scan_dir, module_path) in &module_dirs {
-            let (structs, methods) = scan_directory(scan_dir)?;
+            let (structs, methods, discovered_modules) = scan_directory(scan_dir)?;
 
             // Resolve matching desired bounded context (by name or module_path)
             let desired_bc = desired.and_then(|d| {
@@ -513,6 +540,22 @@ pub fn scan_actual_model(
                 aggregates: desired_bc.map_or(vec![], |b| b.aggregates.clone()),
                 policies: desired_bc.map_or(vec![], |b| b.policies.clone()),
                 read_models: desired_bc.map_or(vec![], |b| b.read_models.clone()),
+                modules: discovered_modules
+                    .iter()
+                    .map(|dm| {
+                        let mod_path = format!("{}::{}", ctx_name, dm.name);
+                        let desired_mod = desired_bc.and_then(|dbc| {
+                            dbc.modules.iter().find(|m| m.name.eq_ignore_ascii_case(&dm.name))
+                        });
+                        Module {
+                            name: dm.name.clone(),
+                            path: mod_path,
+                            public: dm.public,
+                            file_path: dm.file_path.clone(),
+                            description: desired_mod.map_or(String::new(), |m| m.description.clone()),
+                        }
+                    })
+                    .collect(),
                 entities: vec![],
                 value_objects: vec![],
                 services: vec![],
@@ -626,6 +669,19 @@ fn is_public(vis: &syn::Visibility) -> bool {
     matches!(vis, syn::Visibility::Public(_))
 }
 
+/// Check whether an item carries `#[cfg(test)]`.
+fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        // Parse the token stream inside cfg(...) looking for the `test` ident
+        attr.parse_args::<syn::Ident>()
+            .map(|ident| ident == "test")
+            .unwrap_or(false)
+    })
+}
+
 /// Convert a syn::Type to a readable string.
 fn type_to_string(ty: &syn::Type) -> String {
     // Manual conversion without depending on `quote` crate
@@ -699,11 +755,10 @@ mod tests {
             use crate::domain::model::DomainModel;
         "#;
         let deps = extract_live_dependencies(Path::new("test.rs"), code).unwrap();
-        // The visitor walks recursively, producing entries for each nesting level.
-        // std::path::Path → 3 entries, crate::domain::model::DomainModel → 4 entries.
-        assert!(deps.len() >= 2);
-        assert!(deps.iter().any(|d| d.to_module.contains("Path")));
-        assert!(deps.iter().any(|d| d.to_module.contains("DomainModel")));
+        // Each `use` statement produces exactly one resolved path.
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.to_module == "std::path::Path"));
+        assert!(deps.iter().any(|d| d.to_module == "crate::domain::model::DomainModel"));
     }
 
     #[test]
@@ -715,7 +770,7 @@ mod tests {
                 pub age: u32,
             }
         "#;
-        let (structs, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "User");
         assert_eq!(structs[0].fields.len(), 3);
@@ -734,7 +789,7 @@ mod tests {
                 fn private_helper(&self) {} // should be ignored
             }
         "#;
-        let (structs, methods) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(methods.len(), 2); // only public methods
         assert_eq!(methods[0].owner, "Store");
@@ -750,7 +805,7 @@ mod tests {
             struct PrivateStruct { x: i32 }
             pub struct PublicStruct { pub y: i32 }
         "#;
-        let (structs, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "PublicStruct");
     }
@@ -768,7 +823,7 @@ mod tests {
                 }
             }
         "#;
-        let (_, methods) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (_, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(methods.len(), 1); // only inherent impl
         assert_eq!(methods[0].name, "bar");
     }
@@ -942,6 +997,7 @@ impl User {
                 aggregates: vec![],
                 policies: vec![],
                 read_models: vec![],
+                modules: vec![],
                 entities: vec![Entity {
                     name: "User".into(),
                     description: "".into(),

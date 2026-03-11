@@ -9,7 +9,7 @@ use crate::store::Store;
 pub fn list_write_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            name: "set_model".into(),
+            name: "mutate_model".into(),
             description: "Create, update, or remove elements in the desired domain model. \
                           As you process code or conversation, call this tool whenever you \
                           discover domain relationships (entities, aggregates, services, events, \
@@ -178,7 +178,7 @@ fn dispatch_write_tool(
     args: &Value,
 ) -> ToolCallResult {
     match name {
-        "set_model" => {
+        "mutate_model" => {
             let kind = arg_str(args, "kind");
             let action = args
                 .get("action")
@@ -1032,6 +1032,7 @@ mod tests {
                 aggregates: vec![],
                 policies: vec![],
                 read_models: vec![],
+                modules: vec![],
                 entities: vec![Entity {
                     name: "User".into(),
                     description: "A user".into(),
@@ -1076,7 +1077,7 @@ mod tests {
     fn test_update_entity_add_field() {
         let ws = "/tmp/test-add-field";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "entity", "context": "Identity", "name": "User",
             "fields": [{"name": "email", "type": "String", "required": true}]
         }));
@@ -1092,7 +1093,7 @@ mod tests {
     fn test_update_entity_merge_existing_field() {
         let ws = "/tmp/test-merge-field";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "entity", "context": "Identity", "name": "User",
             "fields": [{"name": "id", "type": "Uuid"}]
         }));
@@ -1108,7 +1109,7 @@ mod tests {
     fn test_create_new_entity() {
         let ws = "/tmp/test-new-entity";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "entity", "context": "Identity", "name": "Role",
             "description": "A role assignment", "aggregate_root": false,
             "fields": [{"name": "name", "type": "String"}]
@@ -1124,7 +1125,7 @@ mod tests {
     fn test_update_entity_context_not_found() {
         let ws = "/tmp/test-ctx-notfound";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model",
+        let result = call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "entity", "context": "Nonexistent", "name": "Foo"}),
         );
         assert_eq!(result.is_error, Some(true));
@@ -1134,7 +1135,7 @@ mod tests {
     fn test_create_bounded_context() {
         let ws = "/tmp/test-create-bc";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "bounded_context", "name": "Billing",
             "description": "Billing context", "module_path": "src/billing",
             "dependencies": ["Identity"]
@@ -1150,7 +1151,7 @@ mod tests {
     fn test_update_existing_bounded_context() {
         let ws = "/tmp/test-update-bc";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "bounded_context", "name": "Identity",
             "description": "Updated description"
         }));
@@ -1164,7 +1165,7 @@ mod tests {
     fn test_remove_entity() {
         let ws = "/tmp/test-rm-entity";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model",
+        let result = call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "entity", "action": "remove", "context": "Identity", "name": "User"}),
         );
         assert!(result.is_error.is_none());
@@ -1177,7 +1178,7 @@ mod tests {
     fn test_remove_entity_not_found() {
         let ws = "/tmp/test-rm-entity-nf";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model",
+        let result = call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "entity", "action": "remove", "context": "Identity", "name": "NotHere"}),
         );
         assert_eq!(result.is_error, Some(true));
@@ -1187,7 +1188,7 @@ mod tests {
     fn test_update_service() {
         let ws = "/tmp/test-upd-svc";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "service", "context": "Identity", "name": "AuthService",
             "service_kind": "application", "description": "Handles authentication"
         }));
@@ -1202,7 +1203,7 @@ mod tests {
     fn test_update_event() {
         let ws = "/tmp/test-upd-evt";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "event", "context": "Identity", "name": "UserRegistered",
             "source": "User", "fields": [{"name": "user_id", "type": "UserId"}]
         }));
@@ -1218,7 +1219,7 @@ mod tests {
         let ws = "/tmp/test-upsert-aggregate";
         let store = setup(ws);
 
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "aggregate",
             "context": "Identity",
             "name": "UserAggregate",
@@ -1248,7 +1249,7 @@ mod tests {
         let ws = "/tmp/test-upsert-policy";
         let store = setup(ws);
 
-        call_write_tool(ws, &store, "set_model", &json!({
+        call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "policy",
             "context": "Identity",
             "name": "WelcomePolicy",
@@ -1257,7 +1258,7 @@ mod tests {
             "commands": ["SendWelcomeEmail"]
         }));
 
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "policy",
             "context": "Identity",
             "name": "WelcomePolicy",
@@ -1278,7 +1279,7 @@ mod tests {
         let ws = "/tmp/test-upsert-read-model";
         let store = setup(ws);
 
-        call_write_tool(ws, &store, "set_model", &json!({
+        call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "read_model",
             "context": "Identity",
             "name": "UserProfileView",
@@ -1286,7 +1287,7 @@ mod tests {
             "fields": [{"name": "id", "type": "UserId", "required": true}]
         }));
 
-        let result = call_write_tool(ws, &store, "set_model", &json!({
+        let result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "read_model",
             "context": "Identity",
             "name": "UserProfileView",
@@ -1307,7 +1308,7 @@ mod tests {
         let ws = "/tmp/test-upsert-boundaries";
         let store = setup(ws);
 
-        let system_result = call_write_tool(ws, &store, "set_model", &json!({
+        let system_result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "external_system",
             "name": "Stripe",
             "description": "Payment processor",
@@ -1317,7 +1318,7 @@ mod tests {
         }));
         assert!(system_result.is_error.is_none());
 
-        let decision_result = call_write_tool(ws, &store, "set_model", &json!({
+        let decision_result = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "architectural_decision",
             "name": "ADR-001",
             "title": "Use Stripe for payments",
@@ -1344,17 +1345,17 @@ mod tests {
         let ws = "/tmp/test-remove-expressive";
         let store = setup(ws);
 
-        call_write_tool(ws, &store, "set_model", &json!({
+        call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "aggregate", "context": "Identity", "name": "UserAggregate", "root_entity": "User"
         }));
-        call_write_tool(ws, &store, "set_model", &json!({
+        call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "external_system", "name": "Stripe"
         }));
 
-        let rm_aggregate = call_write_tool(ws, &store, "set_model", &json!({
+        let rm_aggregate = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "aggregate", "action": "remove", "context": "Identity", "name": "UserAggregate"
         }));
-        let rm_system = call_write_tool(ws, &store, "set_model", &json!({
+        let rm_system = call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "external_system", "action": "remove", "name": "Stripe"
         }));
 
@@ -1378,7 +1379,7 @@ mod tests {
     fn test_auto_save_on_mutation() {
         let ws = "/tmp/test-autosave";
         let store = setup(ws);
-        call_write_tool(ws, &store, "set_model",
+        call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "bounded_context", "name": "Billing", "description": "Billing context"}),
         );
         let loaded = store.load_desired(ws).unwrap().unwrap();
@@ -1389,7 +1390,7 @@ mod tests {
     fn test_auto_save_not_on_error() {
         let store = test_store();
         let ws = "/tmp/test-autosave-err";
-        let result = call_write_tool(ws, &store, "set_model",
+        let result = call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "entity", "context": "Nonexistent", "name": "Foo"}),
         );
         assert_eq!(result.is_error, Some(true));
@@ -1400,7 +1401,7 @@ mod tests {
     fn test_draft_refactoring_plan_uses_baseline() {
         let ws = "/tmp/test-baseline";
         let store = setup(ws);
-        call_write_tool(ws, &store, "set_model",
+        call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
         let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
@@ -1412,7 +1413,7 @@ mod tests {
     fn test_draft_plan_does_not_auto_advance() {
         let ws = "/tmp/test-no-advance";
         let store = setup(ws);
-        call_write_tool(ws, &store, "set_model",
+        call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
         let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
@@ -1427,7 +1428,7 @@ mod tests {
     fn test_accept_then_plan_shows_in_sync() {
         let ws = "/tmp/test-accept-sync";
         let store = setup(ws);
-        call_write_tool(ws, &store, "set_model",
+        call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
         let result = call_write_tool(ws, &store, "refactor_model", &json!({"action": "accept"}));
@@ -1442,11 +1443,11 @@ mod tests {
     fn test_reset_reverts_desired() {
         let ws = "/tmp/test-reset-wt";
         let store = setup(ws);
-        call_write_tool(ws, &store, "set_model",
+        call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Original"}),
         );
         call_write_tool(ws, &store, "refactor_model", &json!({"action": "accept"}));
-        call_write_tool(ws, &store, "set_model",
+        call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "bounded_context", "name": "Billing", "description": "New context"}),
         );
         let desired = store.load_desired(ws).unwrap().unwrap();
@@ -1462,12 +1463,12 @@ mod tests {
     fn test_update_service_merges_methods() {
         let ws = "/tmp/test-merge-methods";
         let store = setup(ws);
-        call_write_tool(ws, &store, "set_model", &json!({
+        call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "service", "context": "Identity", "name": "AuthService",
             "service_kind": "application",
             "methods": [{"name": "login", "return_type": "Token"}]
         }));
-        call_write_tool(ws, &store, "set_model", &json!({
+        call_write_tool(ws, &store, "mutate_model", &json!({
             "kind": "service", "context": "Identity", "name": "AuthService",
             "methods": [{"name": "logout", "return_type": "void"}]
         }));
@@ -1481,7 +1482,7 @@ mod tests {
     fn test_remove_bounded_context() {
         let ws = "/tmp/test-rm-bc";
         let store = setup(ws);
-        let result = call_write_tool(ws, &store, "set_model",
+        let result = call_write_tool(ws, &store, "mutate_model",
             &json!({"kind": "bounded_context", "action": "remove", "name": "Identity"}),
         );
         assert!(result.is_error.is_none());
@@ -1493,7 +1494,7 @@ mod tests {
     #[test]
     fn test_missing_kind() {
         let store = test_store();
-        let result = call_write_tool("/tmp/test-ws", &store, "set_model",
+        let result = call_write_tool("/tmp/test-ws", &store, "mutate_model",
             &json!({"name": "Foo"}),
         );
         assert_eq!(result.is_error, Some(true));

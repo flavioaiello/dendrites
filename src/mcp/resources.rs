@@ -142,6 +142,7 @@ mod tests {
                 aggregates: vec![],
                 policies: vec![],
                 read_models: vec![],
+                modules: vec![],
                 entities: vec![],
                 value_objects: vec![],
                 services: vec![],

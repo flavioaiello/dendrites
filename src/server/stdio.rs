@@ -14,7 +14,7 @@ fn load_model(store: &Store, workspace_path: &str) -> DomainModel {
 
 /// List of write-tool names used to route `tools/call` to the mutable path.
 const WRITE_TOOLS: &[&str] = &[
-    "set_model",
+    "mutate_model",
     "refactor_model",
     "scan_model",
 ];
@@ -312,8 +312,8 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"show_model"));
-        assert!(names.contains(&"review_model"));
-        assert!(names.contains(&"set_model"));
+        assert!(names.contains(&"query_model"));
+        assert!(names.contains(&"mutate_model"));
         assert!(names.contains(&"refactor_model"));
     }
 
@@ -347,19 +347,19 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_call_review_model_health() {
+    fn test_tools_call_query_model() {
         let store = test_store();
         let req = make_request(
             "tools/call",
-            Some(json!({"name": "review_model", "arguments": {"analysis": "health"}})),
+            Some(json!({"name": "query_model", "arguments": {"query": "?[name] := *context{workspace: $ws, name}"}})),
         );
         let resp = handle_request("/tmp/test-stdio", &store, &req);
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         let content = result["content"].as_array().unwrap();
         let text = content[0]["text"].as_str().unwrap();
-        let health: Value = serde_json::from_str(text).unwrap();
-        assert!(health["score"].is_number());
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert!(parsed["row_count"].is_number());
     }
 
     #[test]
