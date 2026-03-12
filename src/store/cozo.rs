@@ -203,6 +203,7 @@ impl Store {
     /// Save a scanned model as the actual state (from AST extraction).
     pub fn save_actual(&self, workspace_path: &str, model: &DomainModel) -> Result<()> {
         let ws = canonicalize_path(workspace_path);
+        self.ensure_project(workspace_path)?;
         self.save_state(&ws, model, "actual")
     }
 
