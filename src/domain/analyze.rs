@@ -432,6 +432,13 @@ enum StructKind {
 ///
 /// Enums are most commonly ValueObjects (status codes, type discriminators).
 /// Event naming suffixes override to Event.
+fn module_from_file_path(file_path: &str) -> String {
+    std::path::Path::new(file_path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
 fn classify_enum(name: &str) -> StructKind {
     let upper = name.to_uppercase();
 
@@ -646,6 +653,7 @@ pub fn scan_actual_model(
 
             for discovered in &structs {
                 let name = &discovered.name;
+                let module_name = module_from_file_path(&discovered.file_path);
 
                 // Collect public methods for this struct
                 let struct_methods: Vec<Method> = methods
@@ -687,6 +695,7 @@ pub fn scan_actual_model(
                         bc.entities.push(Entity {
                             name: name.clone(),
                             description: desired_ent.map_or(String::new(), |e| e.description.clone()),
+                            module: module_name.clone(),
                             aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
                             fields: discovered.fields.clone(),
                             methods: struct_methods,
@@ -699,6 +708,7 @@ pub fn scan_actual_model(
                         bc.value_objects.push(ValueObject {
                             name: name.clone(),
                             description: desired_vo.map_or(String::new(), |v| v.description.clone()),
+                            module: module_name.clone(),
                             fields: discovered.fields.clone(),
                             validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
                         });
@@ -709,6 +719,7 @@ pub fn scan_actual_model(
                         bc.services.push(Service {
                             name: name.clone(),
                             description: desired_svc.map_or(String::new(), |s| s.description.clone()),
+                            module: module_name.clone(),
                             kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
                             methods: struct_methods,
                             dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
@@ -719,6 +730,7 @@ pub fn scan_actual_model(
                             .and_then(|dbc| dbc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name)));
                         bc.repositories.push(Repository {
                             name: name.clone(),
+                            module: module_name.clone(),
                             aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
                             methods: struct_methods,
                         });
@@ -729,6 +741,7 @@ pub fn scan_actual_model(
                         bc.events.push(DomainEvent {
                             name: name.clone(),
                             description: desired_evt.map_or(String::new(), |e| e.description.clone()),
+                            module: module_name.clone(),
                             fields: discovered.fields.clone(),
                             source: desired_evt.map_or(String::new(), |e| e.source.clone()),
                         });
@@ -739,6 +752,7 @@ pub fn scan_actual_model(
             // ── Classify discovered enums ──
             for discovered in &enums {
                 let name = &discovered.name;
+                let module_name = module_from_file_path(&discovered.file_path);
 
                 // Collect public methods for this enum (from impl blocks)
                 let enum_methods: Vec<Method> = methods
@@ -776,6 +790,7 @@ pub fn scan_actual_model(
                         bc.entities.push(Entity {
                             name: name.clone(),
                             description: desired_ent.map_or(String::new(), |e| e.description.clone()),
+                            module: module_name.clone(),
                             aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
                             fields: discovered.variants.clone(),
                             methods: enum_methods,
@@ -788,6 +803,7 @@ pub fn scan_actual_model(
                         bc.value_objects.push(ValueObject {
                             name: name.clone(),
                             description: desired_vo.map_or(String::new(), |v| v.description.clone()),
+                            module: module_name.clone(),
                             fields: discovered.variants.clone(),
                             validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
                         });
@@ -798,6 +814,7 @@ pub fn scan_actual_model(
                         bc.services.push(Service {
                             name: name.clone(),
                             description: desired_svc.map_or(String::new(), |s| s.description.clone()),
+                            module: module_name.clone(),
                             kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
                             methods: enum_methods,
                             dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
@@ -808,6 +825,7 @@ pub fn scan_actual_model(
                             .and_then(|dbc| dbc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name)));
                         bc.repositories.push(Repository {
                             name: name.clone(),
+                            module: module_name.clone(),
                             aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
                             methods: enum_methods,
                         });
@@ -818,6 +836,7 @@ pub fn scan_actual_model(
                         bc.events.push(DomainEvent {
                             name: name.clone(),
                             description: desired_evt.map_or(String::new(), |e| e.description.clone()),
+                            module: module_name.clone(),
                             fields: discovered.variants.clone(),
                             source: desired_evt.map_or(String::new(), |e| e.source.clone()),
                         });
@@ -1230,6 +1249,7 @@ impl User {
                 entities: vec![Entity {
                     name: "User".into(),
                     description: "".into(),
+                    module: String::new(),
                     aggregate_root: true,
                     fields: vec![],
                     methods: vec![],
@@ -1238,6 +1258,7 @@ impl User {
                 value_objects: vec![ValueObject {
                     name: "Email".into(),
                     description: "".into(),
+                    module: String::new(),
                     fields: vec![],
                     validation_rules: vec![],
                 }],

@@ -54,6 +54,7 @@ fn ecommerce_model() -> DomainModel {
                     Entity {
                         name: "Product".into(),
                         description: "A sellable product".into(),
+                        module: String::new(),
                         aggregate_root: true,
                         fields: vec![
                             Field { name: "id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
@@ -77,6 +78,7 @@ fn ecommerce_model() -> DomainModel {
                     Entity {
                         name: "Category".into(),
                         description: "Product category".into(),
+                        module: String::new(),
                         aggregate_root: true,
                         fields: vec![
                             Field { name: "id".into(), field_type: "CategoryId".into(), required: true, description: "".into() },
@@ -90,6 +92,7 @@ fn ecommerce_model() -> DomainModel {
                     ValueObject {
                         name: "Money".into(),
                         description: "Monetary amount".into(),
+                        module: String::new(),
                         fields: vec![
                             Field { name: "amount".into(), field_type: "Decimal".into(), required: true, description: "".into() },
                             Field { name: "currency".into(), field_type: "CurrencyCode".into(), required: true, description: "".into() },
@@ -101,6 +104,7 @@ fn ecommerce_model() -> DomainModel {
                     Service {
                         name: "CatalogService".into(),
                         description: "".into(),
+                        module: String::new(),
                         kind: ServiceKind::Application,
                         methods: vec![
                             Method { name: "list_products".into(), description: "".into(), return_type: "Vec<Product>".into(), parameters: vec![] },
@@ -115,6 +119,7 @@ fn ecommerce_model() -> DomainModel {
                 repositories: vec![
                     Repository {
                         name: "ProductRepository".into(),
+                        module: String::new(),
                         aggregate: "Product".into(),
                         methods: vec![
                             Method { name: "find_by_id".into(), description: "".into(), return_type: "Option<Product>".into(),
@@ -132,6 +137,7 @@ fn ecommerce_model() -> DomainModel {
                     DomainEvent {
                         name: "ProductCreated".into(),
                         description: "".into(),
+                        module: String::new(),
                         source: "Product".into(),
                         fields: vec![
                             Field { name: "product_id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
@@ -142,6 +148,7 @@ fn ecommerce_model() -> DomainModel {
                     DomainEvent {
                         name: "PriceChanged".into(),
                         description: "".into(),
+                        module: String::new(),
                         source: "Product".into(),
                         fields: vec![
                             Field { name: "product_id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
@@ -165,6 +172,7 @@ fn ecommerce_model() -> DomainModel {
                     Entity {
                         name: "Order".into(),
                         description: "A customer order".into(),
+                        module: String::new(),
                         aggregate_root: true,
                         fields: vec![
                             Field { name: "id".into(), field_type: "OrderId".into(), required: true, description: "".into() },
@@ -185,6 +193,7 @@ fn ecommerce_model() -> DomainModel {
                     Entity {
                         name: "OrderItem".into(),
                         description: "A line item".into(),
+                        module: String::new(),
                         aggregate_root: false,
                         fields: vec![
                             Field { name: "product_id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
@@ -200,6 +209,7 @@ fn ecommerce_model() -> DomainModel {
                     Service {
                         name: "OrderService".into(),
                         description: "".into(),
+                        module: String::new(),
                         kind: ServiceKind::Application,
                         methods: vec![
                             Method { name: "place_order".into(), description: "".into(), return_type: "Order".into(),
@@ -214,6 +224,7 @@ fn ecommerce_model() -> DomainModel {
                 repositories: vec![
                     Repository {
                         name: "OrderRepository".into(),
+                        module: String::new(),
                         aggregate: "Order".into(),
                         methods: vec![
                             Method { name: "find_by_id".into(), description: "".into(), return_type: "Option<Order>".into(),
@@ -231,6 +242,7 @@ fn ecommerce_model() -> DomainModel {
                     DomainEvent {
                         name: "OrderPlaced".into(),
                         description: "".into(),
+                        module: String::new(),
                         source: "Order".into(),
                         fields: vec![
                             Field { name: "order_id".into(), field_type: "OrderId".into(), required: true, description: "".into() },
@@ -741,6 +753,7 @@ fn perf_scale_10_contexts() {
             entities.push(Entity {
                 name: format!("Entity{j}"),
                 description: "".into(),
+                module: String::new(),
                 aggregate_root: j == 0,
                 fields,
                 methods,

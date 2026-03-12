@@ -187,32 +187,32 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
     ).unwrap_or_default();
 
     let entities = store.run_datalog(
-        &format!("?[ctx, name, description, aggregate_root] := \
-            *entity{{workspace: $ws, context: ctx, name, description, aggregate_root, state: '{state}'}}"),
+        &format!("?[ctx, name, description, module, aggregate_root] := \
+            *entity{{workspace: $ws, context: ctx, name, description, module, aggregate_root, state: '{state}'}}"),
         workspace,
     ).unwrap_or_default();
 
     let services = store.run_datalog(
-        &format!("?[ctx, name, description, kind] := \
-            *service{{workspace: $ws, context: ctx, name, description, kind, state: '{state}'}}"),
+        &format!("?[ctx, name, description, module, kind] := \
+            *service{{workspace: $ws, context: ctx, name, description, module, kind, state: '{state}'}}"),
         workspace,
     ).unwrap_or_default();
 
     let events = store.run_datalog(
-        &format!("?[ctx, name, description, source] := \
-            *event{{workspace: $ws, context: ctx, name, description, source, state: '{state}'}}"),
+        &format!("?[ctx, name, description, module, source] := \
+            *event{{workspace: $ws, context: ctx, name, description, module, source, state: '{state}'}}"),
         workspace,
     ).unwrap_or_default();
 
     let value_objects = store.run_datalog(
-        &format!("?[ctx, name, description] := \
-            *value_object{{workspace: $ws, context: ctx, name, description, state: '{state}'}}"),
+        &format!("?[ctx, name, description, module] := \
+            *value_object{{workspace: $ws, context: ctx, name, description, module, state: '{state}'}}"),
         workspace,
     ).unwrap_or_default();
 
     let repositories = store.run_datalog(
-        &format!("?[ctx, name, aggregate] := \
-            *repository{{workspace: $ws, context: ctx, name, aggregate, state: '{state}'}}"),
+        &format!("?[ctx, name, aggregate, module] := \
+            *repository{{workspace: $ws, context: ctx, name, aggregate, module, state: '{state}'}}"),
         workspace,
     ).unwrap_or_default();
 
@@ -285,7 +285,8 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
                     .collect();
                 json!({
                     "name": ent_name, "description": e[2],
-                    "aggregate_root": e[3] == "true",
+                    "module": e[3],
+                    "aggregate_root": e[4] == "true",
                     "fields": ent_fields, "methods": ent_methods,
                     "invariants": ent_invariants,
                 })
@@ -305,7 +306,7 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
                         json!({"name": m[3], "description": m[4], "return_type": m[5], "parameters": params})
                     })
                     .collect();
-                json!({"name": s[1], "description": s[2], "kind": s[3], "methods": svc_methods})
+                json!({"name": s[1], "description": s[2], "module": s[3], "kind": s[4], "methods": svc_methods})
             })
             .collect();
 
@@ -316,7 +317,7 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
                     .filter(|f| f[0] == *ctx_name && f[1] == "event" && f[2] == ev[1])
                     .map(|f| json!({"name": f[3], "type": f[4], "required": f[5] == "true"}))
                     .collect();
-                json!({"name": ev[1], "description": ev[2], "source": ev[3], "fields": evt_fields})
+                json!({"name": ev[1], "description": ev[2], "module": ev[3], "source": ev[4], "fields": evt_fields})
             })
             .collect();
 
@@ -331,7 +332,7 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
                     .filter(|r| r[0] == *ctx_name && r[1] == vo[1])
                     .map(|r| r[2].as_str())
                     .collect();
-                json!({"name": vo[1], "description": vo[2], "fields": vo_fields, "validation_rules": rules})
+                json!({"name": vo[1], "description": vo[2], "module": vo[3], "fields": vo_fields, "validation_rules": rules})
             })
             .collect();
 
@@ -348,7 +349,7 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
                         json!({"name": m[3], "description": m[4], "return_type": m[5], "parameters": params})
                     })
                     .collect();
-                json!({"name": repo[1], "aggregate": repo[2], "methods": repo_methods})
+                json!({"name": repo[1], "aggregate": repo[2], "module": repo[3], "methods": repo_methods})
             })
             .collect();
 
@@ -406,6 +407,7 @@ mod tests {
                     entities: vec![Entity {
                         name: "User".into(),
                         description: "A user".into(),
+                        module: String::new(),
                         aggregate_root: true,
                         fields: vec![Field {
                             name: "id".into(),
@@ -420,6 +422,7 @@ mod tests {
                     services: vec![Service {
                         name: "AuthService".into(),
                         description: "Handles auth".into(),
+                        module: String::new(),
                         kind: ServiceKind::Application,
                         methods: vec![],
                         dependencies: vec![],

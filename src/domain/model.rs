@@ -229,6 +229,9 @@ pub struct Entity {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// The source module (file stem) this entity was discovered in
+    #[serde(default)]
+    pub module: String,
     /// Whether this is an aggregate root
     #[serde(default)]
     pub aggregate_root: bool,
@@ -247,6 +250,9 @@ pub struct ValueObject {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// The source module (file stem) this value object was discovered in
+    #[serde(default)]
+    pub module: String,
     #[serde(default)]
     pub fields: Vec<Field>,
     #[serde(default)]
@@ -260,6 +266,9 @@ pub struct Service {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// The source module (file stem) this service was discovered in
+    #[serde(default)]
+    pub module: String,
     #[serde(default)]
     pub kind: ServiceKind,
     #[serde(default)]
@@ -282,6 +291,9 @@ pub enum ServiceKind {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
     pub name: String,
+    /// The source module (file stem) this repository was discovered in
+    #[serde(default)]
+    pub module: String,
     /// The aggregate root this repository manages
     pub aggregate: String,
     #[serde(default)]
@@ -295,6 +307,9 @@ pub struct DomainEvent {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// The source module (file stem) this event was discovered in
+    #[serde(default)]
+    pub module: String,
     #[serde(default)]
     pub fields: Vec<Field>,
     /// Which entity/aggregate emits this event

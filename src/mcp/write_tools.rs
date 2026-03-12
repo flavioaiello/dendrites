@@ -25,7 +25,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "kind": {
                         "type": "string",
-                        "enum": ["bounded_context", "aggregate", "entity", "policy", "read_model", "service", "event", "value_object", "repository", "external_system", "architectural_decision"],
+                        "enum": ["bounded_context", "aggregate", "entity", "policy", "read_model", "module", "service", "event", "value_object", "repository", "external_system", "architectural_decision"],
                         "description": "Type of model element to create/update/remove"
                     },
                     "action": {
@@ -204,6 +204,8 @@ fn dispatch_write_tool(
                 ("policy", "remove") => remove_policy(store, workspace_path, args),
                 ("read_model", "upsert") => upsert_read_model(store, workspace_path, args),
                 ("read_model", "remove") => remove_read_model(store, workspace_path, args),
+                ("module", "upsert") => upsert_module(store, workspace_path, args),
+                ("module", "remove") => remove_module(store, workspace_path, args),
                 ("external_system", "upsert") => upsert_external_system(store, workspace_path, args),
                 ("external_system", "remove") => remove_external_system(store, workspace_path, args),
                 ("architectural_decision", "upsert") => upsert_architectural_decision(store, workspace_path, args),
@@ -287,14 +289,15 @@ fn dispatch_write_tool(
                     let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
                     let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
                     let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
+                    let module_count: usize = actual.bounded_contexts.iter().map(|bc| bc.modules.len()).sum();
 
                     match store.save_actual(workspace_path, &actual) {
                         Ok(()) => text_result(
                             json!({
                                 "status": "scanned",
                                 "message": format!(
-                                    "Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events. Actual model updated.",
-                                    actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count
+                                    "Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events, {} modules. Actual model updated.",
+                                    actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count, module_count
                                 ),
                                 "contexts_scanned": actual.bounded_contexts.len(),
                                 "entities": entity_count,
@@ -302,6 +305,7 @@ fn dispatch_write_tool(
                                 "services": svc_count,
                                 "repositories": repo_count,
                                 "events": event_count,
+                                "modules": module_count,
                             })
                             .to_string(),
                         ),
@@ -388,12 +392,14 @@ fn upsert_entity(store: &Store, workspace_path: &str, args: &Value) -> ToolCallR
     let mut entity = existing.clone().unwrap_or(Entity {
         name: entity_name.clone(),
         description: String::new(),
+        module: String::new(),
         aggregate_root: false,
         fields: vec![],
         methods: vec![],
         invariants: vec![],
     });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { entity.description = desc.to_string(); }
+    if let Some(m) = args.get("module").and_then(|v| v.as_str()) { entity.module = m.to_string(); }
     if let Some(agg) = args.get("aggregate_root").and_then(|v| v.as_bool()) { entity.aggregate_root = agg; }
     if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut entity.fields, fields); }
     if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) { merge_methods(&mut entity.methods, methods); }
@@ -431,9 +437,10 @@ fn upsert_service(store: &Store, workspace_path: &str, args: &Value) -> ToolCall
         Err(result) => return result,
     };
     let mut service = existing.clone().unwrap_or(Service {
-        name: svc_name.clone(), description: String::new(), kind: ServiceKind::Domain, methods: vec![], dependencies: vec![]
+        name: svc_name.clone(), description: String::new(), module: String::new(), kind: ServiceKind::Domain, methods: vec![], dependencies: vec![]
     });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { service.description = desc.to_string(); }
+    if let Some(m) = args.get("module").and_then(|v| v.as_str()) { service.module = m.to_string(); }
     if args.get("service_kind").is_some() { service.kind = parse_service_kind(&arg_str(args, "service_kind")); }
     if let Some(deps) = args.get("dependencies").and_then(|v| v.as_array()) { service.dependencies = deps.iter().filter_map(|d| d.as_str().map(String::from)).collect(); }
     if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) { merge_methods(&mut service.methods, methods); }
@@ -464,8 +471,9 @@ fn upsert_event(store: &Store, workspace_path: &str, args: &Value) -> ToolCallRe
         Ok(()) => store.query_event(workspace_path, &ctx_name, &event_name),
         Err(result) => return result,
     };
-    let mut event = existing.clone().unwrap_or(DomainEvent { name: event_name.clone(), description: String::new(), fields: vec![], source: String::new() });
+    let mut event = existing.clone().unwrap_or(DomainEvent { name: event_name.clone(), description: String::new(), module: String::new(), fields: vec![], source: String::new() });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { event.description = desc.to_string(); }
+    if let Some(m) = args.get("module").and_then(|v| v.as_str()) { event.module = m.to_string(); }
     if let Some(src) = args.get("source").and_then(|v| v.as_str()) { event.source = src.to_string(); }
     if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut event.fields, fields); }
     if let Err(e) = store.upsert_event(workspace_path, &ctx_name, &event) {
@@ -495,8 +503,9 @@ fn upsert_value_object(store: &Store, workspace_path: &str, args: &Value) -> Too
         Ok(()) => store.query_value_object(workspace_path, &ctx_name, &vo_name),
         Err(result) => return result,
     };
-    let mut value_object = existing.clone().unwrap_or(ValueObject { name: vo_name.clone(), description: String::new(), fields: vec![], validation_rules: vec![] });
+    let mut value_object = existing.clone().unwrap_or(ValueObject { name: vo_name.clone(), description: String::new(), module: String::new(), fields: vec![], validation_rules: vec![] });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { value_object.description = desc.to_string(); }
+    if let Some(m) = args.get("module").and_then(|v| v.as_str()) { value_object.module = m.to_string(); }
     if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut value_object.fields, fields); }
     if let Some(rules) = args.get("validation_rules").and_then(|v| v.as_array()) {
         for rule in rules {
@@ -524,6 +533,42 @@ fn remove_value_object(store: &Store, workspace_path: &str, args: &Value) -> Too
     }
 }
 
+fn upsert_module(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let mod_name = arg_str(args, "name");
+
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_module(workspace_path, &ctx_name, &mod_name),
+        Err(result) => return result,
+    };
+    let mut module = existing.clone().unwrap_or(Module {
+        name: mod_name.clone(),
+        path: String::new(),
+        public: true,
+        file_path: String::new(),
+        description: String::new(),
+    });
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { module.description = desc.to_string(); }
+    if let Some(path) = args.get("module_path").and_then(|v| v.as_str()) { module.path = path.to_string(); }
+    if let Some(public) = args.get("public").and_then(|v| v.as_bool()) { module.public = public; }
+    if let Err(e) = store.upsert_module(workspace_path, &ctx_name, &module) {
+        return error_result(format!("Failed to upsert module: {e}"));
+    }
+    text_result(json!({
+        "message": format!("{} module '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, mod_name, ctx_name),
+    }).to_string())
+}
+
+fn remove_module(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let mod_name = arg_str(args, "name");
+    match store.remove_module(workspace_path, &ctx_name, &mod_name) {
+        Ok(true) => text_result(format!("Removed module '{mod_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Module '{mod_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove module: {e}")),
+    }
+}
+
 fn upsert_repository(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let repo_name = arg_str(args, "name");
@@ -532,8 +577,9 @@ fn upsert_repository(store: &Store, workspace_path: &str, args: &Value) -> ToolC
         Ok(()) => store.query_repository(workspace_path, &ctx_name, &repo_name),
         Err(result) => return result,
     };
-    let mut repository = existing.clone().unwrap_or(Repository { name: repo_name.clone(), aggregate: String::new(), methods: vec![] });
+    let mut repository = existing.clone().unwrap_or(Repository { name: repo_name.clone(), module: String::new(), aggregate: String::new(), methods: vec![] });
     if let Some(agg) = args.get("aggregate").and_then(|v| v.as_str()) { repository.aggregate = agg.to_string(); }
+    if let Some(m) = args.get("module").and_then(|v| v.as_str()) { repository.module = m.to_string(); }
     if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) { merge_methods(&mut repository.methods, methods); }
     if let Err(e) = store.upsert_repository(workspace_path, &ctx_name, &repository) {
         return error_result(format!("Failed to upsert repository: {e}"));
@@ -1036,6 +1082,7 @@ mod tests {
                 entities: vec![Entity {
                     name: "User".into(),
                     description: "A user".into(),
+                    module: String::new(),
                     aggregate_root: true,
                     fields: vec![Field {
                         name: "id".into(),
