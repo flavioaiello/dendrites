@@ -250,6 +250,7 @@ mod tests {
                 entities: vec![],
                 value_objects: vec![],
                 services: vec![],
+                api_endpoints: vec![],
                 repositories: vec![],
                 events: vec![],
                 dependencies: vec![],

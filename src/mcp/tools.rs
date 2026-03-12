@@ -636,6 +636,7 @@ mod tests {
                     repositories: vec![],
                     events: vec![],
                     dependencies: vec![],
+                    api_endpoints: vec![],
                 },
                 BoundedContext {
                     name: "Billing".into(),
@@ -648,6 +649,7 @@ mod tests {
                     entities: vec![],
                     value_objects: vec![],
                     services: vec![],
+                    api_endpoints: vec![],
                     repositories: vec![],
                     events: vec![],
                     dependencies: vec!["Identity".into()],
@@ -761,6 +763,7 @@ mod tests {
             entities: vec![],
             value_objects: vec![],
             services: vec![],
+            api_endpoints: vec![],
             repositories: vec![],
             events: vec![],
             dependencies: vec!["Billing".into()],

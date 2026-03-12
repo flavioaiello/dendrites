@@ -519,6 +519,7 @@ pub fn scan_actual_model(
                 repositories: vec![],
                 events: vec![],
                 dependencies: desired_bc.map_or(vec![], |b| b.dependencies.clone()),
+                api_endpoints: desired_bc.map_or(vec![], |b| b.api_endpoints.clone()),
             };
 
             for discovered in &structs {
@@ -957,6 +958,7 @@ impl User {
                     validation_rules: vec![],
                 }],
                 services: vec![],
+                api_endpoints: vec![],
                 repositories: vec![],
                 events: vec![],
                 dependencies: vec![],

@@ -1,0 +1,243 @@
+use anyhow::{Context, Result};
+use std::path::Path;
+use syn::visit::Visit;
+
+use super::analyze::{DiscoveredMethod, DiscoveredStruct, LiveDependency};
+use super::model::Field;
+use super::scanner::AstScanner;
+
+pub struct RustSynScanner;
+
+impl AstScanner for RustSynScanner {
+    fn extract_live_dependencies(
+        &self,
+        file_path: &Path,
+        source_code: &str,
+    ) -> Result<Vec<LiveDependency>> {
+        let syntax_tree = syn::parse_file(source_code)
+            .with_context(|| format!("Failed to parse rust file: {}", file_path.display()))?;
+
+        struct ImportVisitor {
+            imports: Vec<String>,
+        }
+
+        impl<'ast> Visit<'ast> for ImportVisitor {
+            fn visit_use_tree(&mut self, node: &'ast syn::UseTree) {
+                // Very basic extraction: turn use trees into string paths
+                fn extract_paths(tree: &syn::UseTree, prefix: &str) -> Vec<String> {
+                    match tree {
+                        syn::UseTree::Path(path) => extract_paths(
+                            &path.tree,
+                            &format!(
+                                "{}{}{}::",
+                                prefix,
+                                if prefix.is_empty() { "" } else { "::" },
+                                path.ident
+                            ),
+                        ),
+                        syn::UseTree::Name(name) => vec![format!("{}{}", prefix, name.ident)],
+                        syn::UseTree::Rename(rename) => vec![format!("{}{}", prefix, rename.ident)],
+                        syn::UseTree::Glob(_) => vec![format!("{}*", prefix)],
+                        syn::UseTree::Group(group) => {
+                            let mut paths = vec![];
+                            for item in &group.items {
+                                paths.extend(extract_paths(item, prefix));
+                            }
+                            paths
+                        }
+                    }
+                }
+                self.imports.extend(extract_paths(node, ""));
+                syn::visit::visit_use_tree(self, node);
+            }
+        }
+
+        let mut visitor = ImportVisitor { imports: vec![] };
+        visitor.visit_file(&syntax_tree);
+
+        let from_file = file_path.to_string_lossy().to_string();
+        let deps = visitor
+            .imports
+            .into_iter()
+            .map(|to_module| LiveDependency {
+                from_file: from_file.clone(),
+                to_module,
+            })
+            .collect();
+
+        Ok(deps)
+    }
+
+    fn scan_file(
+        &self,
+        file_path: &Path,
+        source_code: &str,
+    ) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)> {
+        let syntax_tree = syn::parse_file(source_code)
+            .with_context(|| format!("Failed to parse: {}", file_path.display()))?;
+
+        let mut visitor = StructMethodVisitor {
+            structs: vec![],
+            methods: vec![],
+            file_path: file_path.to_string_lossy().to_string(),
+        };
+        visitor.visit_file(&syntax_tree);
+
+        Ok((visitor.structs, visitor.methods))
+    }
+}
+
+fn is_public(vis: &syn::Visibility) -> bool {
+    matches!(vis, syn::Visibility::Public(_))
+}
+
+fn type_to_string(ty: &syn::Type) -> String {
+    let mut tokens = proc_macro2::TokenStream::new();
+    quote::ToTokens::to_tokens(ty, &mut tokens);
+    tokens.to_string().replace(' ', "")
+}
+
+fn is_option_type(ty: &syn::Type) -> bool {
+    let type_str = type_to_string(ty);
+    type_str.starts_with("Option<") || type_str.starts_with("std::option::Option<")
+}
+
+struct StructMethodVisitor {
+    structs: Vec<DiscoveredStruct>,
+    methods: Vec<DiscoveredMethod>,
+    file_path: String,
+}
+
+impl<'ast> Visit<'ast> for StructMethodVisitor {
+    fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
+        if !is_public(&node.vis) {
+            return;
+        }
+
+        let name = node.ident.to_string();
+        let fields = match &node.fields {
+            syn::Fields::Named(named) => named
+                .named
+                .iter()
+                .filter_map(|f| {
+                    let field_name = f.ident.as_ref()?.to_string();
+                    let field_type = type_to_string(&f.ty);
+                    Some(Field {
+                        name: field_name,
+                        field_type,
+                        required: !is_option_type(&f.ty),
+                        description: String::new(),
+                    })
+                })
+                .collect(),
+            syn::Fields::Unnamed(_) => {
+                tracing::warn!(
+                    "Tuple struct {} encountered in {}, tuple structs are currently mapped as empty-field records",
+                    name,
+                    self.file_path
+                );
+                vec![]
+            }
+            syn::Fields::Unit => {
+                tracing::warn!(
+                    "Unit struct {} encountered in {}, mapping as zero-field record",
+                    name,
+                    self.file_path
+                );
+                vec![]
+            }
+        };
+
+        self.structs.push(DiscoveredStruct {
+            name,
+            fields,
+            file_path: self.file_path.clone(),
+        });
+
+        syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        // Only inherent impls, not trait impls
+        if node.trait_.is_some() {
+            return;
+        }
+
+        let owner = type_to_string(&node.self_ty);
+
+        for item in &node.items {
+            if let syn::ImplItem::Fn(method) = item {
+                if !is_public(&method.vis) {
+                    continue;
+                }
+
+                let name = method.sig.ident.to_string();
+                let return_type = match &method.sig.output {
+                    syn::ReturnType::Default => String::new(),
+                    syn::ReturnType::Type(_, ty) => type_to_string(ty),
+                };
+
+                let mut pre_conditions = Vec::new();
+                let mut post_conditions = Vec::new();
+
+                for attr in &method.attrs {
+                    if attr.path().is_ident("doc") {
+                        if let syn::Meta::NameValue(meta) = &attr.meta {
+                            if let syn::Expr::Lit(expr_lit) = &meta.value {
+                                if let syn::Lit::Str(lit_str) = &expr_lit.lit {
+                                    let doc_str = lit_str.value().trim().to_string();
+                                    if let Some(req) = doc_str.strip_prefix("Requires: ") {
+                                        pre_conditions.push(req.trim().to_string());
+                                    } else if let Some(req) = doc_str.strip_prefix("requires: ") {
+                                        pre_conditions.push(req.trim().to_string());
+                                    } else if let Some(ens) = doc_str.strip_prefix("Ensures: ") {
+                                        post_conditions.push(ens.trim().to_string());
+                                    } else if let Some(ens) = doc_str.strip_prefix("ensures: ") {
+                                        post_conditions.push(ens.trim().to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let parameters: Vec<Field> = method
+                    .sig
+                    .inputs
+                    .iter()
+                    .filter_map(|arg| match arg {
+                        syn::FnArg::Typed(pat_type) => {
+                            let param_name = match pat_type.pat.as_ref() {
+                                syn::Pat::Ident(ident) => ident.ident.to_string(),
+                                _ => {
+                                    tracing::warn!("Unrecognized param pattern in method {}::{}, skipping param", owner, name);
+                                    return None;
+                                }
+                            };
+                            let param_type = type_to_string(&pat_type.ty);
+                            Some(Field {
+                                name: param_name,
+                                field_type: param_type,
+                                required: true,
+                                description: String::new(),
+                            })
+                        }
+                        syn::FnArg::Receiver(_) => None, // skip &self
+                    })
+                    .collect();
+
+                self.methods.push(DiscoveredMethod {
+                    owner: owner.clone(),
+                    name,
+                    parameters,
+                    return_type,
+                    file_path: self.file_path.clone(),
+                    pre_conditions,
+                    post_conditions,
+                });
+            }
+        }
+
+        syn::visit::visit_item_impl(self, node);
+    }
+}

@@ -18,3 +18,8 @@ syn = { version = "2.0", features = ["full", "visit"] }
 walkdir = "2"
 ignore = "0.4.20"
 notify = "8.2.0"
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
+tree-sitter = "0.26.6"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"

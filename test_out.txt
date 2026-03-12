@@ -1,0 +1,129 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running unittests src/lib.rs (target/debug/deps/dendrites-c50b4c49ddbc8b95)
+
+running 88 tests
+test domain::analyze::tests::test_classify_struct_naming_conventions ... ok
+test domain::analyze::tests::test_classify_struct_structural_heuristics ... ok
+test domain::tests::test_to_snake_already_lower ... ok
+test domain::tests::test_to_snake_simple ... ok
+test domain::tests::test_to_snake_consecutive_caps ... ok
+test mcp::prompts::tests::test_list_prompts ... ok
+test domain::analyze::tests::test_extract_live_deps ... ok
+test domain::analyze::tests::test_scan_file_skips_private_structs ... ok
+test domain::analyze::tests::test_scan_file_struct_fields ... ok
+test domain::analyze::tests::test_scan_file_skips_trait_impls ... ok
+test domain::analyze::tests::test_scan_file_impl_methods ... ok
+test mcp::tools::tests::test_list_tools_count ... ok
+test domain::analyze::tests::test_scan_actual_model_classifies_by_desired ... ok
+test domain::analyze::tests::test_scan_actual_model_discovers_without_desired ... ok
+test mcp::prompts::tests::test_get_prompt_not_found ... ok
+test mcp::prompts::tests::test_prompt_healthy_model_no_warnings ... ok
+test mcp::prompts::tests::test_prompt_includes_contexts ... ok
+test mcp::prompts::tests::test_prompt_includes_workflow ... ok
+test mcp::prompts::tests::test_get_prompt_found ... ok
+test mcp::prompts::tests::test_prompt_includes_health_section ... ok
+test mcp::resources::tests::test_read_resource_unknown ... ok
+test mcp::resources::tests::test_read_resource_overview ... ok
+test mcp::resources::tests::test_read_resource_context_not_found ... ok
+test mcp::resources::tests::test_list_resources_includes_static_and_context ... ok
+test mcp::resources::tests::test_read_resource_context ... ok
+test mcp::tools::tests::test_overview_no_actual_shows_status ... ok
+test mcp::tools::tests::test_query_model_circular_deps ... ok
+test mcp::write_tools::tests::test_list_write_tools_count ... ok
+test mcp::tools::tests::test_query_model_missing_param ... ok
+test mcp::tools::tests::test_unknown_tool ... ok
+test mcp::write_tools::tests::test_auto_save_not_on_error ... ok
+test mcp::tools::tests::test_query_model_datalog ... ok
+test mcp::tools::tests::test_query_model_dependency_graph ... ok
+test mcp::tools::tests::test_query_model_transitive_deps ... ok
+test mcp::write_tools::tests::test_missing_kind ... ok
+test mcp::tools::tests::test_overview_shows_desired_and_actual ... ok
+test mcp::write_tools::tests::test_create_new_entity ... ok
+test mcp::write_tools::tests::test_auto_save_on_mutation ... ok
+test mcp::write_tools::tests::test_remove_bounded_context ... ok
+test mcp::write_tools::tests::test_create_bounded_context ... ok
+test mcp::write_tools::tests::test_remove_entity_not_found ... ok
+test mcp::write_tools::tests::test_unknown_write_tool ... ok
+test mcp::write_tools::tests::test_remove_entity ... ok
+test mcp::write_tools::tests::test_draft_refactoring_plan_uses_baseline ... ok
+test mcp::write_tools::tests::test_accept_then_plan_shows_in_sync ... ok
+test mcp::write_tools::tests::test_draft_plan_does_not_auto_advance ... ok
+test mcp::write_tools::tests::test_update_entity_context_not_found ... ok
+test mcp::write_tools::tests::test_remove_expressive_elements ... ok
+test mcp::write_tools::tests::test_update_entity_add_field ... ok
+test server::stdio::tests::test_initialize_echoes_client_version ... ok
+test mcp::write_tools::tests::test_update_existing_bounded_context ... ok
+test server::stdio::tests::test_ping_returns_empty_object ... ok
+test server::stdio::tests::test_initialize_falls_back_to_baseline_version ... ok
+test mcp::write_tools::tests::test_update_entity_merge_existing_field ... ok
+test mcp::write_tools::tests::test_update_event ... ok
+test mcp::write_tools::tests::test_upsert_aggregate_persists_members_and_ownership ... ok
+test mcp::write_tools::tests::test_upsert_external_system_and_decision ... ok
+test mcp::write_tools::tests::test_update_service ... ok
+test server::stdio::tests::test_prompts_get_nonexistent_returns_error ... ok
+test server::stdio::tests::test_prompts_list_returns_guidelines ... ok
+test mcp::write_tools::tests::test_upsert_policy_merges_links ... ok
+test mcp::write_tools::tests::test_update_service_merges_methods ... ok
+test mcp::write_tools::tests::test_upsert_read_model_merges_fields ... ok
+test server::stdio::tests::test_resources_list_returns_entries ... ok
+test server::stdio::tests::test_tools_list_returns_all_tools ... ok
+test server::stdio::tests::test_tools_call_missing_params_returns_error ... ok
+test server::stdio::tests::test_tools_call_model_health ... ok
+test server::stdio::tests::test_unknown_method_returns_error ... ok
+test store::cozo::tests::test_aggregate_roots_without_invariants ... ok
+test store::cozo::tests::test_circular_deps ... ok
+test store::cozo::tests::test_load_nonexistent ... ok
+test mcp::write_tools::tests::test_reset_reverts_desired ... ok
+test store::cozo::tests::test_dependency_graph ... ok
+test store::cozo::tests::test_list_projects ... ok
+test store::cozo::tests::test_impact_analysis ... ok
+test store::cozo::tests::test_datalog_query_fields ... ok
+test store::cozo::tests::test_raw_datalog_query ... ok
+test store::cozo::tests::test_no_circular_deps ... ok
+test store::cozo::tests::test_accept_and_load_actual ... ok
+test store::cozo::tests::test_transitive_deps ... ok
+test store::cozo::tests::test_save_and_load ... ok
+test store::cozo::tests::test_diff_graph_pure_datalog ... ok
+test store::cozo::tests::test_upsert ... ok
+test store::cozo::tests::test_rich_model_round_trip ... ok
+test store::cozo::tests::test_diff_graph_field_level ... ok
+test store::cozo::tests::test_diff_graph_method_level ... ok
+test store::cozo::tests::test_reset ... ok
+test store::cozo::tests::test_rich_model_accept_and_reset ... ok
+
+test result: ok. 88 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+     Running unittests src/main.rs (target/debug/deps/dendrites-ea79add96a898be5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/reasoning_integration.rs (target/debug/deps/reasoning_integration-b6d543b7aee9dc38)
+
+running 16 tests
+test cross_context_event_field_join_with_first_class ... ok
+test method_search_with_first_class_methods ... ok
+test param_analysis_with_first_class_params ... ok
+test param_analysis_without_first_class_params ... ok
+test type_usage_with_first_class_fields ... ok
+test invariant_coverage_with_first_class_invariants ... ok
+test invariant_coverage_without_first_class_invariants ... ok
+test method_search_without_first_class_methods ... ok
+test type_usage_without_first_class_fields ... ok
+test vo_validation_rules_with_first_class ... ok
+test field_level_diff_with_first_class_fields ... ok
+test method_level_diff_with_first_class_methods ... ok
+test field_level_diff_without_first_class_fields ... ok
+test invariant_level_diff_with_first_class_invariants ... ok
+test perf_save_load_diff_cycle ... ok
+test perf_scale_10_contexts ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s
+
+   Doc-tests dendrites
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

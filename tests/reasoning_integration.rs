@@ -150,6 +150,7 @@ fn ecommerce_model() -> DomainModel {
                     },
                 ],
                 dependencies: vec![],
+                api_endpoints: vec![],
             },
             BoundedContext {
                 name: "Ordering".into(),
@@ -238,6 +239,7 @@ fn ecommerce_model() -> DomainModel {
                     },
                 ],
                 dependencies: vec!["Catalog".into()],
+                api_endpoints: vec![],
             },
         ],
         external_systems: vec![],
@@ -759,6 +761,7 @@ fn perf_scale_10_contexts() {
             repositories: vec![],
             events: vec![],
             dependencies: if i > 0 { vec![format!("Context{}", i - 1)] } else { vec![] },
+            api_endpoints: vec![],
         });
     }
 

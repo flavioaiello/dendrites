@@ -135,6 +135,8 @@ pub struct BoundedContext {
     #[serde(default)]
     pub services: Vec<Service>,
     #[serde(default)]
+    pub api_endpoints: Vec<APIEndpoint>,
+    #[serde(default)]
     pub repositories: Vec<Repository>,
     #[serde(default)]
     pub events: Vec<DomainEvent>,
@@ -282,6 +284,20 @@ pub struct DomainEvent {
 }
 
 // ─── External Boundaries ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct APIEndpoint {
+    pub id: String,
+    pub service_id: String,
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub route_pattern: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalSystem {

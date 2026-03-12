@@ -103,6 +103,9 @@ impl Store {
             ":create repository { workspace: String, context: String, name: String, state: String => aggregate: String default '' }",
             ":create external_system { workspace: String, name: String, state: String => description: String default '', kind: String default '', rationale: String default '' }",
             ":create external_system_context { workspace: String, system: String, context: String, idx: Int, state: String }",
+            ":create api_endpoint { workspace: String, context: String, id: String, state: String => service_id: String default '', method: String default '', route_pattern: String default '', description: String default '' }",
+            ":create invokes_endpoint { workspace: String, caller_context: String, caller_method: String, endpoint_id: String, state: String }",
+            ":create calls_external_system { workspace: String, caller_context: String, caller_method: String, ext_id: String, state: String }",
             ":create architectural_decision { workspace: String, id: String, state: String => title: String default '', status: String default 'proposed', scope: String default '', date: String default '', rationale: String default '' }",
             ":create decision_context { workspace: String, decision_id: String, context: String, idx: Int, state: String }",
             ":create decision_consequence { workspace: String, decision_id: String, idx: Int, state: String => text: String default '' }",
@@ -808,7 +811,27 @@ impl Store {
                 self.save_fields(workspace, &bc.name, "read_model", &read_model.name, &read_model.fields, state)?;
             }
 
-            for svc in &bc.services {
+            
+            for ep in &bc.api_endpoints {
+                let params = params_map(&[
+                    ("ws", workspace),
+                    ("ctx", &bc.name),
+                    ("id", &ep.id),
+                    ("st", state),
+                    ("svc", &ep.service_id),
+                    ("met", &ep.method),
+                    ("path", &ep.route_pattern),
+                    ("desc", &ep.description),
+                ]);
+                self.db.run_script(
+                    "?[workspace, context, id, state, service_id, method, route_pattern, description] <- \
+                     [[$ws, $ctx, $id, $st, $svc, $met, $path, $desc]] \
+                     :put api_endpoint { workspace, context, id, state => service_id, method, route_pattern, description }",
+                    params,
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save api_endpoint: {:?}", e))?;
+            }
+for svc in &bc.services {
                 let kind_str = format!("{:?}", svc.kind).to_lowercase();
                 self.db.run_script(
                     "?[workspace, context, name, state, description, kind] <- [[$ws, $ctx, $name, $st, $desc, $kind]] :put service { workspace, context, name, state => description, kind }",
@@ -1329,6 +1352,21 @@ impl Store {
                 )
                 .map(|r| r.rows)
                 .unwrap_or_default();
+            let api_endpoints_rows = self.db.run_script(
+                "?[id, service_id, method, route_pattern, description] := *api_endpoint{workspace: $ws, context: $ctx, id, state: $st, service_id, method, route_pattern, description}",
+                params_map(&[("ws", &ws), ("ctx", &ctx_name), ("st", state)]),
+                ScriptMutability::Immutable,
+            ).map(|r| r.rows).unwrap_or_default();
+            let api_endpoints: Vec<APIEndpoint> = api_endpoints_rows.iter().map(|r| {
+                APIEndpoint {
+                    id: dv_str(&r[0]),
+                    service_id: dv_str(&r[1]),
+                    method: dv_str(&r[2]),
+                    route_pattern: dv_str(&r[3]),
+                    description: dv_str(&r[4]),
+                }
+            }).collect();
+
             let events: Vec<DomainEvent> = evts
                 .iter()
                 .map(|r| {
@@ -1400,6 +1438,7 @@ impl Store {
                 entities,
                 value_objects,
                 services,
+                api_endpoints,
                 repositories,
                 events,
                 dependencies,
@@ -1784,6 +1823,49 @@ impl Store {
         let _ = self.db.run_script("?[workspace, context, entity, idx, state] := *invariant{workspace, context, entity, idx, state}, workspace = $ws, context = $ctx, entity = $name, state = 'desired' :rm invariant { workspace, context, entity, idx, state }", p.clone(), ScriptMutability::Mutable);
         self.db.run_script("?[workspace, context, name, state] <- [[$ws, $ctx, $name, 'desired']] :rm entity { workspace, context, name, state }", p, ScriptMutability::Mutable).map_err(|e| anyhow::anyhow!("remove_entity: {:?}", e))?;
         Ok(true)
+    }
+
+    
+    pub fn upsert_api_endpoint(&self, workspace_path: &str, ctx: &str, ep: &APIEndpoint) -> Result<()> {
+        let ws = canonicalize_path(workspace_path);
+        self.ensure_project(workspace_path)?;
+        let params = params_map(&[
+            ("ws", &ws), ("ctx", ctx), ("id", &ep.id), ("svc", &ep.service_id),
+            ("met", &ep.method), ("path", &ep.route_pattern), ("desc", &ep.description)
+        ]);
+        self.db.run_script(
+            "?[workspace, context, id, state, service_id, method, route_pattern, description] <- \
+             [[$ws, $ctx, $id, 'desired', $svc, $met, $path, $desc]] :put api_endpoint { workspace, context, id, state => service_id, method, route_pattern, description }",
+            params, ScriptMutability::Mutable
+        ).map_err(|e| anyhow::anyhow!("upsert_api_endpoint: {:?}", e))?;
+        Ok(())
+    }
+
+    pub fn remove_api_endpoint(&self, workspace_path: &str, ctx: &str, id: &str) -> Result<bool> {
+        let ws = canonicalize_path(workspace_path);
+        let params = params_map(&[("ws", &ws), ("ctx", ctx), ("id", id)]);
+        let _ = self.db.run_script(
+            "?[workspace, context, id, state] := *api_endpoint{workspace, context, id, state}, workspace = $ws, context = $ctx, id = $id, state = 'desired' :rm api_endpoint { workspace, context, id, state }",
+            params, ScriptMutability::Mutable
+        ).map_err(|e| anyhow::anyhow!("remove_api_endpoint: {:?}", e))?;
+        Ok(true)
+    }
+
+    pub fn query_api_endpoint(&self, ws: &str, ctx: &str, id: &str) -> Option<APIEndpoint> {
+        let ws = canonicalize_path(ws);
+        let rows = self.db.run_script(
+            "?[service_id, method, route_pattern, description] := *api_endpoint{workspace: $ws, context: $ctx, id: $id, state: 'desired', service_id, method, route_pattern, description}",
+            params_map(&[("ws", &ws), ("ctx", ctx), ("id", id)]),
+            ScriptMutability::Immutable
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(APIEndpoint {
+            id: id.to_string(),
+            service_id: dv_str(&row[0]),
+            method: dv_str(&row[1]),
+            route_pattern: dv_str(&row[2]),
+            description: dv_str(&row[3]),
+        })
     }
 
     pub fn upsert_service(&self, workspace_path: &str, ctx: &str, service: &Service) -> Result<()> {
@@ -2599,6 +2681,7 @@ mod tests {
             description: "Full test model".into(),
             bounded_contexts: vec![
                 BoundedContext {
+                    api_endpoints: vec![],
                     name: "Identity".into(),
                     description: "Auth context".into(),
                     module_path: "src/identity".into(),
@@ -2632,6 +2715,7 @@ mod tests {
                     dependencies: vec![],
                 },
                 BoundedContext {
+                    api_endpoints: vec![],
                     name: "Billing".into(),
                     description: "Billing context".into(),
                     module_path: "src/billing".into(),
@@ -2674,6 +2758,7 @@ mod tests {
             name: "RichTest".into(),
             description: "Rich model with all sub-structures".into(),
             bounded_contexts: vec![BoundedContext {
+                    api_endpoints: vec![],
                 name: "Catalog".into(),
                 description: "Product catalog".into(),
                 module_path: "src/catalog".into(),
@@ -3144,6 +3229,7 @@ mod tests {
         store.accept(ws).unwrap();
         let mut modified = full_model();
         modified.bounded_contexts.push(BoundedContext {
+                    api_endpoints: vec![],
             name: "NewCtx".into(),
             description: "".into(),
             module_path: "".into(),
