@@ -141,6 +141,10 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
             name: "refactor_model".into(),
             description: "Manage the refactoring lifecycle between actual and desired domain models. \
                           Actions: \
+                          'diagnose' — run the full analysis pipeline (scan freshness, health score, \
+                          all invariant checks, actual vs desired drift, AST edge statistics) and \
+                          return a composite report with prioritized next_actions. Use this to kick off \
+                          or continue the self-improvement loop. \
                           'plan' (default) — diff actual vs desired and produce a full refactoring \
                           plan with code actions, file paths, priorities, and migration notes. \
                           'accept' — after implementing the refactoring, promote desired → actual. \
@@ -151,7 +155,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["plan", "accept", "reset"],
+                        "enum": ["diagnose", "plan", "accept", "reset"],
                         "description": "Refactoring lifecycle action (default: plan)"
                     }
                 },
@@ -296,6 +300,10 @@ fn dispatch_write_tool(
                 .unwrap_or("plan");
 
             match action {
+                "diagnose" => {
+                    diagnose_pipeline(store, workspace_path)
+                }
+
                 "plan" => {
                     // PHASE 3 GRAPH MIGRATION: Delegate diffing into Datalog
                     match store.diff_graph(workspace_path) {
@@ -346,7 +354,7 @@ fn dispatch_write_tool(
                     }
                 }
 
-                _ => error_result(format!("Unknown action '{action}'. Use 'plan', 'accept', or 'reset'.")),
+                _ => error_result(format!("Unknown action '{action}'. Use 'diagnose', 'plan', 'accept', or 'reset'.")),
             }
         }
 
@@ -1091,6 +1099,246 @@ fn suggest_file(module_path: &str, kind: &str, name: &str) -> String {
 }
 
 /// Enrich raw Datalog diff with suggested files, priorities, rationale, and health score.
+/// Runs the full architectural analysis pipeline in one call.
+///
+/// Returns health, all invariant checks, actual-vs-desired drift, AST edge
+/// statistics, and prioritized `next_actions` so the calling agent knows
+/// exactly what to do next. This is the orchestrator for the self-improvement loop.
+fn diagnose_pipeline(store: &Store, workspace_path: &str) -> ToolCallResult {
+    let canonical = crate::store::cozo::canonicalize_path(workspace_path);
+
+    // ── 1. Check if actual model exists ────────────────────────────────
+    let has_actual = store
+        .load_actual(workspace_path)
+        .ok()
+        .flatten()
+        .is_some_and(|m| !m.bounded_contexts.is_empty());
+
+    let has_desired = store
+        .load_desired(workspace_path)
+        .ok()
+        .flatten()
+        .is_some_and(|m| !m.bounded_contexts.is_empty());
+
+    // ── 2. Health check ────────────────────────────────────────────────
+    let health = store.model_health(&canonical).ok();
+    let health_json = health.as_ref().map(|h| {
+        json!({
+            "score": h.score,
+            "circular_deps": h.circular_deps,
+            "layer_violations": h.layer_violations.iter().map(|v| json!({
+                "context": v.context,
+                "domain_service": v.domain_service,
+                "infra_dependency": v.infra_dependency,
+            })).collect::<Vec<_>>(),
+            "missing_invariants": h.missing_invariants,
+            "orphan_contexts": h.orphan_contexts,
+            "god_contexts": h.god_contexts,
+            "unsourced_events": h.unsourced_events,
+        })
+    });
+
+    // ── 3. Invariant checks ────────────────────────────────────────────
+    let circular = store.circular_deps(&canonical).unwrap_or_default();
+    let layers = store.layer_violations(&canonical).unwrap_or_default();
+    let agg_quality = store.aggregate_roots_without_invariants(&canonical).unwrap_or_default();
+    let policy = store.evaluate_policy_violations(&canonical).ok();
+
+    let invariants = json!({
+        "circular_deps": {
+            "status": if circular.is_empty() { "pass" } else { "fail" },
+            "count": circular.len(),
+            "cycles": circular.iter().map(|(a, b)| json!({"from": a, "to": b})).collect::<Vec<_>>(),
+        },
+        "layer_violations": {
+            "status": if layers.is_empty() { "pass" } else { "fail" },
+            "count": layers.len(),
+            "violations": layers.iter().map(|(ctx, svc, dep)| json!({
+                "context": ctx, "service": svc, "dependency": dep,
+            })).collect::<Vec<_>>(),
+        },
+        "aggregate_quality": {
+            "status": if agg_quality.is_empty() { "pass" } else { "fail" },
+            "count": agg_quality.len(),
+            "roots_without_invariants": agg_quality.iter().map(|(ctx, ent)| json!({
+                "context": ctx, "entity": ent,
+            })).collect::<Vec<_>>(),
+        },
+        "policy_violations": policy.as_ref().map(|p| json!({
+            "status": p["status"],
+            "count": p["count"],
+            "violations": p["violations"],
+        })),
+    });
+
+    // ── 4. Actual vs desired drift ─────────────────────────────────────
+    let drift = store.diff_graph(workspace_path).ok().map(|diff| {
+        let changes = diff["pending_changes"].as_array().cloned().unwrap_or_default();
+        json!({
+            "status": if changes.is_empty() { "in_sync" } else { "drifted" },
+            "pending_change_count": changes.len(),
+            "pending_changes": changes,
+        })
+    });
+
+    // ── 5. AST edge statistics ─────────────────────────────────────────
+    let ast_stats = store.load_actual(workspace_path).ok().flatten().map(|m| {
+        let total = m.ast_edges.len();
+        let mut by_type: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for edge in &m.ast_edges {
+            *by_type.entry(edge.edge_type.as_str()).or_default() += 1;
+        }
+        let breakdown: serde_json::Map<String, Value> = by_type
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), json!(v)))
+            .collect();
+        json!({
+            "total": total,
+            "by_type": breakdown,
+        })
+    });
+
+    // ── 6. Compute prioritized next actions ────────────────────────────
+    let mut next_actions: Vec<Value> = Vec::new();
+    let mut priority = 0u32;
+
+    if !has_actual {
+        next_actions.push(json!({
+            "priority": priority,
+            "tool": "scan_model",
+            "reason": "No actual model exists. Scan the workspace to extract architecture from source code.",
+        }));
+        priority += 1;
+    }
+
+    // Critical: cycles must be broken first
+    if !circular.is_empty() {
+        next_actions.push(json!({
+            "priority": priority,
+            "tool": "set_model",
+            "reason": format!(
+                "{} circular dependency cycle(s) detected. Break cycles by extracting shared concepts or using events.",
+                circular.len()
+            ),
+            "evidence": circular.iter().map(|(a, b)| format!("{a} ⇄ {b}")).collect::<Vec<_>>(),
+        }));
+        priority += 1;
+    }
+
+    // Critical: layer violations
+    if !layers.is_empty() {
+        next_actions.push(json!({
+            "priority": priority,
+            "tool": "set_model",
+            "reason": format!(
+                "{} layer violation(s). Domain services depend on infrastructure directly. Invert via ports/adapters.",
+                layers.len()
+            ),
+            "evidence": layers.iter().map(|(ctx, svc, dep)| format!("{ctx}.{svc} → {dep}")).collect::<Vec<_>>(),
+        }));
+        priority += 1;
+    }
+
+    // Warning: policy violations
+    if let Some(ref p) = policy {
+        let pcount = p["count"].as_u64().unwrap_or(0);
+        if pcount > 0 {
+            next_actions.push(json!({
+                "priority": priority,
+                "tool": "assert_model",
+                "action": "evaluate",
+                "reason": format!("{pcount} policy violation(s). Declared constraints are not met."),
+            }));
+            priority += 1;
+        }
+    }
+
+    // Warning: aggregate quality
+    if !agg_quality.is_empty() {
+        next_actions.push(json!({
+            "priority": priority,
+            "tool": "set_model",
+            "reason": format!(
+                "{} aggregate root(s) without invariants. Add business rules to protect consistency.",
+                agg_quality.len()
+            ),
+            "evidence": agg_quality.iter().map(|(ctx, ent)| format!("{ctx}.{ent}")).collect::<Vec<_>>(),
+        }));
+        priority += 1;
+    }
+
+    // Warning: unsourced events
+    if let Some(ref h) = health {
+        if !h.unsourced_events.is_empty() {
+            next_actions.push(json!({
+                "priority": priority,
+                "tool": "set_model",
+                "reason": format!(
+                    "{} event(s) without a source entity. Link them to their originating aggregate.",
+                    h.unsourced_events.len()
+                ),
+                "evidence": h.unsourced_events.iter().map(|[ctx, evt]| format!("{ctx}.{evt}")).collect::<Vec<_>>(),
+            }));
+            priority += 1;
+        }
+    }
+
+    // Info: orphan contexts
+    if let Some(ref h) = health {
+        if !h.orphan_contexts.is_empty() {
+            next_actions.push(json!({
+                "priority": priority,
+                "tool": "set_model",
+                "reason": format!(
+                    "{} orphan context(s) with no dependencies. Add dependencies or verify they are intentionally standalone.",
+                    h.orphan_contexts.len()
+                ),
+                "evidence": &h.orphan_contexts,
+            }));
+        }
+    }
+
+    // Info: drift between actual and desired
+    if let Some(ref d) = drift {
+        let dcount = d["pending_change_count"].as_u64().unwrap_or(0);
+        if dcount > 0 {
+            next_actions.push(json!({
+                "priority": priority,
+                "tool": "refactor_model",
+                "action": "plan",
+                "reason": format!("{dcount} pending change(s) between desired and actual. Run 'plan' for detailed refactoring steps."),
+            }));
+        }
+    }
+
+    // If nothing else needed, suggest re-scan to verify
+    if next_actions.is_empty() && has_actual {
+        next_actions.push(json!({
+            "priority": 0,
+            "tool": "scan_model",
+            "reason": "Architecture is healthy (score 100). Re-scan periodically to verify after code changes.",
+        }));
+    }
+
+    let score = health.as_ref().map(|h| h.score).unwrap_or(0);
+
+    text_result(
+        json!({
+            "status": if score == 100 { "healthy" } else if score >= 70 { "needs_improvement" } else { "unhealthy" },
+            "health_score": score,
+            "health": health_json,
+            "invariants": invariants,
+            "drift": drift,
+            "ast_edges": ast_stats,
+            "has_actual_model": has_actual,
+            "has_desired_model": has_desired,
+            "next_actions": next_actions,
+            "loop_hint": "After implementing fixes, call scan_model then diagnose again to verify improvement.",
+        })
+        .to_string(),
+    )
+}
+
 fn enrich_plan(store: &Store, workspace_path: &str, changes: &[Value]) -> Value {
     // Build context → module_path lookup from desired state
     let module_paths: std::collections::HashMap<String, String> = store
@@ -1220,6 +1468,7 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }
     }
 
@@ -1660,5 +1909,63 @@ mod tests {
             &json!({"name": "Foo"}),
         );
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn test_diagnose_returns_structured_report() {
+        let ws = "/tmp/test-diagnose";
+        let store = setup(ws);
+
+        // diagnose on a model with data
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({"action": "diagnose"}));
+        assert!(result.is_error.is_none() || result.is_error == Some(false));
+
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ContentBlock::Text { text } => text.clone(),
+        };
+        let report: serde_json::Value = serde_json::from_str(&text).expect("diagnose must return valid JSON");
+
+        // Must have required top-level fields
+        assert!(report.get("health_score").is_some(), "must have health_score");
+        assert!(report.get("invariants").is_some(), "must have invariants");
+        assert!(report.get("next_actions").is_some(), "must have next_actions");
+        assert!(report.get("has_desired_model").is_some(), "must have has_desired_model");
+        assert!(report.get("loop_hint").is_some(), "must have loop_hint");
+
+        // Invariants must have all 4 checks
+        let inv = &report["invariants"];
+        assert!(inv.get("circular_deps").is_some());
+        assert!(inv.get("layer_violations").is_some());
+        assert!(inv.get("aggregate_quality").is_some());
+        assert!(inv.get("policy_violations").is_some());
+
+        // next_actions must be an array with at least one action
+        let actions = report["next_actions"].as_array().expect("next_actions must be array");
+        assert!(!actions.is_empty(), "diagnose must suggest at least one next action");
+
+        // Each action must have priority, tool, and reason
+        for action in actions {
+            assert!(action.get("priority").is_some(), "action must have priority");
+            assert!(action.get("tool").is_some(), "action must have tool");
+            assert!(action.get("reason").is_some(), "action must have reason");
+        }
+    }
+
+    #[test]
+    fn test_diagnose_on_empty_store() {
+        let store = test_store();
+        let result = call_write_tool("/tmp/test-diagnose-empty", &store, "refactor_model", &json!({"action": "diagnose"}));
+        assert!(result.is_error.is_none() || result.is_error == Some(false));
+
+        let text = match &result.content[0] {
+            crate::mcp::protocol::ContentBlock::Text { text } => text.clone(),
+        };
+        let report: serde_json::Value = serde_json::from_str(&text).expect("diagnose must return valid JSON");
+
+        // No actual model → should suggest scan_model
+        assert_eq!(report["has_actual_model"], false);
+        let actions = report["next_actions"].as_array().unwrap();
+        let first = &actions[0];
+        assert_eq!(first["tool"], "scan_model", "first action on empty store should be scan_model");
     }
 }

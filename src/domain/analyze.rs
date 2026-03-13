@@ -106,6 +106,9 @@ pub struct DiscoveredStruct {
     pub end_line: usize,
     pub fields: Vec<Field>,
     pub file_path: String,
+    pub extends: Vec<String>,
+    pub implements: Vec<String>,
+    pub decorators: Vec<String>,
 }
 
 /// A method discovered from an impl block.
@@ -119,6 +122,9 @@ pub struct DiscoveredMethod {
     pub parameters: Vec<Field>,
     pub return_type: String,
     pub file_path: String,
+    pub extends: Vec<String>,
+    pub implements: Vec<String>,
+    pub decorators: Vec<String>,
 }
 
 /// An enum discovered in the source code with its variants.
@@ -130,6 +136,9 @@ pub struct DiscoveredEnum {
     /// Variants represented as Fields: name = variant ident, field_type = associated data.
     pub variants: Vec<Field>,
     pub file_path: String,
+    pub extends: Vec<String>,
+    pub implements: Vec<String>,
+    pub decorators: Vec<String>,
 }
 
 /// A module declaration discovered in the AST.
@@ -138,6 +147,9 @@ pub struct DiscoveredModule {
     pub name: String,
     pub public: bool,
     pub file_path: String,
+    pub extends: Vec<String>,
+    pub implements: Vec<String>,
+    pub decorators: Vec<String>,
 }
 
 /// Everything discovered in source files under a single bounded context's module path.
@@ -196,6 +208,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
             end_line: node.span().end().line,
             fields,
             file_path: self.file_path.clone(),
+            extends: vec![],
+            implements: vec![],
+            decorators: vec![],
         });
 
         syn::visit::visit_item_struct(self, node);
@@ -246,6 +261,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
             end_line: node.span().end().line,
             variants,
             file_path: self.file_path.clone(),
+            extends: vec![],
+            implements: vec![],
+            decorators: vec![],
         });
 
         syn::visit::visit_item_enum(self, node);
@@ -260,6 +278,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
             name,
             public: is_public(&node.vis),
             file_path: self.file_path.clone(),
+            extends: vec![],
+            implements: vec![],
+            decorators: vec![],
         });
         syn::visit::visit_item_mod(self, node);
     }
@@ -314,6 +335,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
                     parameters,
                     return_type,
                     file_path: self.file_path.clone(),
+                    extends: vec![],
+                    implements: vec![],
+                    decorators: vec![],
                 });
             }
         }
@@ -580,6 +604,7 @@ pub fn scan_actual_model(
         rules: desired.map_or(vec![], |d| d.rules.clone()),
         tech_stack: desired.map_or(TechStack::default(), |d| d.tech_stack.clone()),
         conventions: desired.map_or(Conventions::default(), |d| d.conventions.clone()),
+        ast_edges: vec![],
     };
 
     // 1. Discover all crate source directories
@@ -900,6 +925,30 @@ pub fn scan_actual_model(
             }
 
             actual.bounded_contexts.push(bc);
+
+            // Harvest AST edges from polyglot structural relationships
+            for s in &structs {
+                for ext in &s.extends {
+                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: s.name.clone(), to_node: ext.clone(), edge_type: "extends".into() });
+                }
+                for imp in &s.implements {
+                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: s.name.clone(), to_node: imp.clone(), edge_type: "implements".into() });
+                }
+                for dec in &s.decorators {
+                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: s.name.clone(), to_node: dec.clone(), edge_type: "decorators".into() });
+                }
+            }
+            for e in &enums {
+                for ext in &e.extends {
+                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: e.name.clone(), to_node: ext.clone(), edge_type: "extends".into() });
+                }
+                for imp in &e.implements {
+                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: e.name.clone(), to_node: imp.clone(), edge_type: "implements".into() });
+                }
+                for dec in &e.decorators {
+                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: e.name.clone(), to_node: dec.clone(), edge_type: "decorators".into() });
+                }
+            }
         }
     }
 
@@ -1129,6 +1178,9 @@ mod tests {
             file_path: String::new(),
             start_line: 0,
             end_line: 0,
+            extends: vec![],
+            implements: vec![],
+            decorators: vec![],
         }];
 
         // Data fields + methods → Entity
@@ -1278,6 +1330,7 @@ impl User {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         };
 
         let actual = scan_actual_model(&tmp, Some(&desired)).unwrap();

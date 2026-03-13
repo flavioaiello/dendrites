@@ -79,6 +79,7 @@ fn self_scan_persist_show_roundtrip() {
 
     eprintln!("── Self-scan results ──");
     eprintln!("  Bounded contexts: {}", actual.bounded_contexts.len());
+    eprintln!("  AST edges: {}", actual.ast_edges.len());
     for bc in &actual.bounded_contexts {
         eprintln!(
             "    {} → {} entities, {} services, {} VOs, {} events, {} deps",
@@ -86,6 +87,12 @@ fn self_scan_persist_show_roundtrip() {
             bc.value_objects.len(), bc.events.len(), bc.dependencies.len()
         );
     }
+
+    // Verify AST edges are populated (dendrites uses derive macros and trait impls)
+    assert!(
+        !actual.ast_edges.is_empty(),
+        "Self-scan must discover AST edges (derives, trait impls) from dendrites Rust source"
+    );
 
     // ── Step 2: Persist to CozoDB ──────────────────────────────────────
     store.save_desired(&ws, &actual)
@@ -637,4 +644,70 @@ fn self_mutate_remove_elements() {
         "Disposable must be gone after removal"
     );
     eprintln!("── Remove: context + entity successfully deleted ──");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 7: Self-improvement loop — diagnose on dendrites itself
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_diagnose_improvement_loop() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // ── Step 1: Scan actual model ──────────────────────────────────────
+    let actual = scan_actual_model(&ws_root, None)
+        .expect("scan_actual_model must succeed");
+    store.save_actual(&ws, &actual).expect("save_actual must succeed");
+    store.save_desired(&ws, &actual).expect("save_desired must succeed");
+
+    // ── Step 2: Run diagnose ───────────────────────────────────────────
+    let result = call_write_tool(&ws, &store, "refactor_model", &json!({"action": "diagnose"}));
+    let report = unwrap_tool_text(&result);
+
+    eprintln!("── Diagnose results ──");
+    eprintln!("  Status: {}", report["status"]);
+    eprintln!("  Health score: {}", report["health_score"]);
+    eprintln!("  Has actual: {}", report["has_actual_model"]);
+    eprintln!("  Has desired: {}", report["has_desired_model"]);
+
+    // Must have a health score
+    let score = report["health_score"].as_u64().expect("must have health_score");
+    eprintln!("  Score: {score}");
+
+    // Must have invariant results
+    let inv = &report["invariants"];
+    assert!(inv["circular_deps"]["status"].is_string(), "circular_deps must have status");
+    assert!(inv["layer_violations"]["status"].is_string(), "layer_violations must have status");
+    assert!(inv["aggregate_quality"]["status"].is_string(), "aggregate_quality must have status");
+
+    // Must have next_actions
+    let actions = report["next_actions"].as_array().expect("must have next_actions array");
+    eprintln!("  Next actions: {}", actions.len());
+    for (i, action) in actions.iter().enumerate() {
+        eprintln!("    [{i}] {} → {}", action["tool"], action["reason"]);
+    }
+
+    // Must have AST edge statistics (since we scanned Rust source)
+    let ast = &report["ast_edges"];
+    assert!(ast["total"].as_u64().unwrap_or(0) > 0, "must have AST edges from Rust scanning");
+    eprintln!("  AST edges: {}", ast["total"]);
+
+    // Must have loop_hint
+    assert!(report["loop_hint"].is_string(), "must have loop_hint");
+
+    // ── Step 3: Verify the loop is actionable ──────────────────────────
+    // After scan, models are in sync so no drift, but aggregate quality
+    // issues should be detected (dendrites has aggregate roots without invariants)
+    assert!(
+        report["has_actual_model"].as_bool().unwrap(),
+        "must have actual model after scan"
+    );
+    assert!(
+        report["has_desired_model"].as_bool().unwrap(),
+        "must have desired model after scan"
+    );
+
+    eprintln!("── Self-improvement loop: diagnose verified ──");
 }

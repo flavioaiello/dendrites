@@ -1085,6 +1085,7 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }).unwrap();
 
         let result = call_tool(&store, &ws, "can_delete_symbol", &json!({
@@ -1153,6 +1154,7 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }).unwrap();
 
         let result = call_tool(&store, &ws, "query_dependency_path", &json!({

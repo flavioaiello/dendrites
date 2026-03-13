@@ -82,9 +82,24 @@ impl AstScanner for RustSynScanner {
             enums: vec![],
             methods: vec![],
             modules: vec![],
+            trait_impls: vec![],
             file_path: file_path.to_string_lossy().to_string(),
         };
         visitor.visit_file(&syntax_tree);
+
+        // Backfill implements on structs from trait impls
+        for (type_name, trait_name) in &visitor.trait_impls {
+            for s in &mut visitor.structs {
+                if s.name == *type_name {
+                    s.implements.push(trait_name.clone());
+                }
+            }
+            for e in &mut visitor.enums {
+                if e.name == *type_name {
+                    e.implements.push(trait_name.clone());
+                }
+            }
+        }
 
         Ok((visitor.structs, visitor.enums, visitor.methods, visitor.modules))
     }
@@ -116,11 +131,46 @@ fn is_option_type(ty: &syn::Type) -> bool {
     type_str.starts_with("Option<") || type_str.starts_with("std::option::Option<")
 }
 
+/// Extract derive macros and other proc-macro attributes as decorator names.
+fn extract_decorators(attrs: &[syn::Attribute]) -> Vec<String> {
+    let mut decorators = Vec::new();
+    for attr in attrs {
+        if attr.path().is_ident("derive") {
+            // Parse derive(A, B, C) into individual decorator names
+            let _ = attr.parse_nested_meta(|meta| {
+                let path = meta
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                decorators.push(path);
+                Ok(())
+            });
+        } else {
+            // Other attributes like #[serde(...)], #[tokio::main], etc.
+            let path = attr
+                .path()
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            if !path.is_empty() && path != "doc" && path != "cfg" && path != "allow" {
+                decorators.push(path);
+            }
+        }
+    }
+    decorators
+}
+
 struct StructMethodVisitor {
     structs: Vec<DiscoveredStruct>,
     enums: Vec<DiscoveredEnum>,
     methods: Vec<DiscoveredMethod>,
     modules: Vec<DiscoveredModule>,
+    trait_impls: Vec<(String, String)>, // (type_name, trait_name)
     file_path: String,
 }
 
@@ -131,6 +181,10 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
         }
 
         let name = node.ident.to_string();
+
+        // Extract derive macros and other attributes as decorators
+        let decorators = extract_decorators(&node.attrs);
+
         let fields = match &node.fields {
             syn::Fields::Named(named) => named
                 .named
@@ -170,6 +224,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
             end_line: node.span().end().line,
             fields,
             file_path: self.file_path.clone(),
+            extends: vec![],
+            implements: vec![],
+            decorators,
         });
 
         syn::visit::visit_item_struct(self, node);
@@ -181,6 +238,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
         }
 
         let name = node.ident.to_string();
+
+        // Extract derive macros and other attributes as decorators
+        let decorators = extract_decorators(&node.attrs);
         let variants = node
             .variants
             .iter()
@@ -220,6 +280,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
             end_line: node.span().end().line,
             variants,
             file_path: self.file_path.clone(),
+            extends: vec![],
+            implements: vec![],
+            decorators,
         });
 
         syn::visit::visit_item_enum(self, node);
@@ -234,17 +297,32 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
             name,
             public: is_public(&node.vis),
             file_path: self.file_path.clone(),
+            extends: vec![],
+            implements: vec![],
+            decorators: vec![],
         });
         syn::visit::visit_item_mod(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
-        // Only inherent impls, not trait impls
-        if node.trait_.is_some() {
-            return;
+        let owner = type_to_string(&node.self_ty);
+
+        // Record trait impl relationship
+        if let Some((_, ref trait_path, _)) = node.trait_ {
+            let trait_name = trait_path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>()
+                .join("::");
+            self.trait_impls.push((owner.clone(), trait_name));
         }
 
-        let owner = type_to_string(&node.self_ty);
+        // Skip method extraction for trait impls (they mirror the trait definition)
+        if node.trait_.is_some() {
+            syn::visit::visit_item_impl(self, node);
+            return;
+        }
 
         for item in &node.items {
             if let syn::ImplItem::Fn(method) = item {
@@ -291,6 +369,9 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
                     parameters,
                     return_type,
                     file_path: self.file_path.clone(),
+                    extends: vec![],
+                    implements: vec![],
+                    decorators: vec![],
                 });
             }
         }

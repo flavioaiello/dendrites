@@ -95,6 +95,16 @@ Dendrites maintains two models: the **actual** model (reflects implemented code)
 5. **Iterate** steps 2–4 until the desired model is satisfactory
 6. **After implementing** → call `refactor` with `action: "accept"` to promote desired → actual
 7. **To discard changes** → call `refactor` with `action: "reset"` to revert desired → actual
+
+### Self-Improvement Loop
+
+To continuously improve the architecture, use the `diagnose` action as the loop orchestrator:
+
+1. **Diagnose** → call `refactor_model` with `action: "diagnose"` — runs the full pipeline (health, invariants, drift, AST edges) and returns prioritized `next_actions`
+2. **Follow next_actions** → implement the highest-priority fix (break cycles, fix layer violations, add invariants, resolve drift)
+3. **Re-scan** → call `scan_model` to update the actual model from source
+4. **Diagnose again** → call `refactor_model` with `action: "diagnose"` — health score should improve
+5. **Iterate** until `status: "healthy"` (score 100)
 {rules_section}
 {health_section}"#
     );
@@ -262,6 +272,7 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }
     }
 

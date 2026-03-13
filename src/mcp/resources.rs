@@ -157,6 +157,7 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         };
         store.save_desired(ws, &model).unwrap();
         (store, ws.to_string())

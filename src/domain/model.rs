@@ -1,6 +1,16 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+// ─── AST Edge ──────────────────────────────────────────────────────────────
+
+/// A structural dependency extracted from source AST (extends, implements, decorators).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ASTEdge {
+    pub from_node: String,
+    pub to_node: String,
+    pub edge_type: String,
+}
+
 // ─── Top-Level Domain Model ────────────────────────────────────────────────
 
 /// The root of the domain model configuration.
@@ -33,6 +43,9 @@ pub struct DomainModel {
     /// Naming conventions
     #[serde(default)]
     pub conventions: Conventions,
+    /// AST structural dependencies (extends, implements, decorators)
+    #[serde(default)]
+    pub ast_edges: Vec<ASTEdge>,
 }
 
 impl DomainModel {
@@ -52,6 +65,7 @@ impl DomainModel {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }
     }
 

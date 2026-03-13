@@ -264,6 +264,7 @@ fn ecommerce_model() -> DomainModel {
         ],
         tech_stack: TechStack::default(),
         conventions: Conventions::default(),
+        ast_edges: vec![],
     }
 }
 
@@ -799,6 +800,7 @@ fn perf_scale_10_contexts() {
         rules: vec![],
         tech_stack: TechStack::default(),
         conventions: Conventions::default(),
+        ast_edges: vec![],
     };
 
     // Total: 10 contexts × 3 entities × (5 fields + 2 methods + 2 params) = 270 sub-structure rows

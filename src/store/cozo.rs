@@ -149,6 +149,8 @@ impl Store {
             ":create dependency_constraint { workspace: String, constraint_kind: String, source: String, target: String => rule: String default 'forbidden' }",
             // Ephemeral — no state column
             ":create live_import { workspace: String, from_file: String, to_module: String }",
+            // AST structural edges (extends, implements, decorators)
+            ":create ast_edge { workspace: String, state: String, from_node: String, to_node: String, edge_type: String }",
         ];
 
         for schema in schemas {
@@ -1003,6 +1005,21 @@ for svc in &bc.services {
             }
         }
 
+        // Save AST edges
+        for edge in &model.ast_edges {
+            self.db.run_script(
+                "?[workspace, state, from_node, to_node, edge_type] <- [[$ws, $st, $from, $to, $kind]] :put ast_edge { workspace, state, from_node, to_node, edge_type }",
+                params_map(&[
+                    ("ws", workspace),
+                    ("st", state),
+                    ("from", &edge.from_node),
+                    ("to", &edge.to_node),
+                    ("kind", &edge.edge_type),
+                ]),
+                ScriptMutability::Mutable,
+            ).map_err(|e| anyhow::anyhow!("save ast_edge: {:?}", e))?;
+        }
+
         Ok(())
     }
 
@@ -1035,6 +1052,7 @@ for svc in &bc.services {
             ("method", "workspace, context, owner_kind, owner, name, state"),
             ("method_param", "workspace, context, owner_kind, owner, method, name, state"),
             ("vo_rule", "workspace, context, value_object, idx, state"),
+            ("ast_edge", "workspace, state, from_node, to_node, edge_type"),
         ];
         for (rel, keys) in tables {
             let script = format!(
@@ -1631,6 +1649,18 @@ for svc in &bc.services {
             rules,
             tech_stack,
             conventions,
+            ast_edges: {
+                let rows = self.db.run_script(
+                    "?[from_node, to_node, edge_type] := *ast_edge{workspace: $ws, state: $st, from_node, to_node, edge_type}",
+                    params_map(&[("ws", &ws), ("st", state)]),
+                    ScriptMutability::Immutable,
+                ).map(|r| r.rows).unwrap_or_default();
+                rows.iter().map(|r| crate::domain::model::ASTEdge {
+                    from_node: dv_str(&r[0]),
+                    to_node: dv_str(&r[1]),
+                    edge_type: dv_str(&r[2]),
+                }).collect()
+            },
         }))
     }
 
@@ -2723,6 +2753,17 @@ for svc in &bc.services {
             )
             .map_err(|e| anyhow::anyhow!("impact dependents: {:?}", e))?;
 
+        let ast_impact = self
+            .db
+            .run_script(
+                "ast[target, type] := *ast_edge{workspace: $ws, state: 'actual', from_node: $ent, to_node: target, edge_type: type} \
+                 ast[target, type] := ast[mid, _], *ast_edge{workspace: $ws, state: 'actual', from_node: mid, to_node: target, edge_type: type} \
+                 ?[target, type] := ast[target, type]",
+                params_map(&[("ws", workspace), ("ent", entity_name)]),
+                ScriptMutability::Immutable,
+            )
+            .map_err(|e| anyhow::anyhow!("ast impact: {:?}", e))?;
+
         Ok(json!({
             "entity": entity_name,
             "context": context,
@@ -2734,6 +2775,9 @@ for svc in &bc.services {
                 .collect::<Vec<_>>(),
             "dependent_contexts": dependents.rows.iter()
                 .map(|r| dv_str(&r[0]))
+                .collect::<Vec<_>>(),
+            "ast_impact": ast_impact.rows.iter()
+                .map(|r| json!({"target": dv_str(&r[0]), "type": dv_str(&r[1])}))
                 .collect::<Vec<_>>(),
         }))
     }
@@ -3126,6 +3170,7 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }
     }
 
@@ -3214,6 +3259,7 @@ mod tests {
             }],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }
     }
 
@@ -3412,6 +3458,7 @@ mod tests {
             rules: vec![],
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
+            ast_edges: vec![],
         }
     }
 

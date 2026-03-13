@@ -184,12 +184,56 @@ fn python_extract_classes(
             None => continue,
         };
 
+        // Extract superclasses from argument_list child (e.g. class Foo(Bar, Baz):)
+        let mut extends = Vec::new();
+        if let Some(cn) = class_node {
+            for child in children(cn) {
+                if child.kind() == "argument_list" {
+                    for arg in children(child) {
+                        let kind = arg.kind();
+                        if kind == "identifier" {
+                            extends.push(node_text(arg, source).to_string());
+                        } else if kind == "attribute" {
+                            // e.g. module.ClassName
+                            extends.push(node_text(arg, source).to_string());
+                        } else if kind == "keyword_argument" {
+                            // e.g. metaclass=ABCMeta — skip
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract decorators from decorator children (e.g. @dataclass)
+        let mut decorators = Vec::new();
+        if let Some(cn) = class_node {
+            for child in children(cn) {
+                if child.kind() == "decorator" {
+                    // decorator node has an expression child (identifier or call)
+                    if let Some(expr) = child.child(1) {
+                        let dec_text = if expr.kind() == "call" {
+                            // @decorator(args) — extract just the function name
+                            expr.child_by_field_name("function")
+                                .map(|f| node_text(f, source))
+                                .unwrap_or_else(|| node_text(expr, source))
+                        } else {
+                            node_text(expr, source)
+                        };
+                        decorators.push(dec_text.to_string());
+                    }
+                }
+            }
+        }
+
         structs.push(DiscoveredStruct {
             name: name.to_string(),
             start_line: class_nd.start_position().row + 1,
             end_line: class_nd.end_position().row + 1,
             fields,
             file_path: file_path.to_string(),
+            extends,
+            implements: vec![],
+            decorators,
         });
 
         // Extract methods from class body
@@ -361,6 +405,9 @@ fn python_extract_methods(
             parameters: params,
             return_type,
             file_path: file_path.to_string(),
+            extends: vec![],
+            implements: vec![],
+            decorators: vec![],
         });
     }
 
@@ -523,12 +570,77 @@ fn ts_extract_classes(
         };
 
         let fields = ts_extract_class_fields(source, body);
+
+        // Extract heritage clauses (extends/implements) from class node
+        let mut extends = Vec::new();
+        let mut implements = Vec::new();
+        for child in children(class_nd) {
+            if child.kind() == "class_heritage" {
+                for heritage in children(child) {
+                    if heritage.kind() == "extends_clause" {
+                        for type_node in children(heritage) {
+                            if type_node.kind() != "extends" {
+                                // Could be a type_identifier or generic_type
+                                let text = node_text(type_node, source).trim().to_string();
+                                if !text.is_empty() {
+                                    extends.push(text);
+                                }
+                            }
+                        }
+                    } else if heritage.kind() == "implements_clause" {
+                        for type_node in children(heritage) {
+                            if type_node.kind() != "implements" {
+                                let text = node_text(type_node, source).trim().to_string();
+                                if !text.is_empty() {
+                                    implements.push(text);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract decorators
+        let mut decorators = Vec::new();
+        if let Some(cn) = class_node {
+            // In TS, decorators are siblings before the class or children of a decorated declaration
+            if let Some(parent) = cn.parent() {
+                if parent.kind() == "export_statement" || parent.kind() == "program" {
+                    // Look for decorator siblings before this node
+                    let idx = cn.start_position();
+                    if let Some(pp) = cn.parent() {
+                        for sib in children(pp) {
+                            if sib.start_position() >= idx {
+                                break;
+                            }
+                            if sib.kind() == "decorator" {
+                                if let Some(expr) = sib.child(1) {
+                                    let dec_text = if expr.kind() == "call_expression" {
+                                        expr.child_by_field_name("function")
+                                            .map(|f| node_text(f, source))
+                                            .unwrap_or_else(|| node_text(expr, source))
+                                    } else {
+                                        node_text(expr, source)
+                                    };
+                                    decorators.push(dec_text.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         structs.push(DiscoveredStruct {
             name: name.to_string(),
             start_line: class_nd.start_position().row + 1,
             end_line: class_nd.end_position().row + 1,
             fields,
             file_path: file_path.to_string(),
+            extends,
+            implements,
+            decorators,
         });
 
         let class_methods = ts_extract_class_methods(source, body, name, file_path);
@@ -539,24 +651,28 @@ fn ts_extract_classes(
     let iface_query_src = r#"
         (interface_declaration
           name: (type_identifier) @iface_name
-          body: (interface_body) @iface_body)
+          body: (interface_body) @iface_body) @iface_node
     "#;
 
     if let Ok(iface_query) = Query::new(&language, iface_query_src) {
         let iface_name_idx = iface_query.capture_index_for_name("iface_name").unwrap();
         let iface_body_idx = iface_query.capture_index_for_name("iface_body").unwrap();
+        let iface_node_idx = iface_query.capture_index_for_name("iface_node").unwrap();
         let mut cursor2 = QueryCursor::new();
 
         let mut iface_matches = cursor2.matches(&iface_query, root, source.as_bytes());
         while let Some(m) = iface_matches.next() {
             let mut name = "";
             let mut body_node = None;
+            let mut iface_node = None;
 
             for cap in m.captures {
                 if cap.index == iface_name_idx {
                     name = node_text(cap.node, source);
                 } else if cap.index == iface_body_idx {
                     body_node = Some(cap.node);
+                } else if cap.index == iface_node_idx {
+                    iface_node = Some(cap.node);
                 }
             }
 
@@ -568,16 +684,32 @@ fn ts_extract_classes(
                 .map(|b| ts_extract_interface_fields(source, b))
                 .unwrap_or_default();
 
-            // Use body_node position as interface captures don't have a dedicated node capture
-            if let Some(body) = body_node {
-                structs.push(DiscoveredStruct {
-                    name: name.to_string(),
-                    start_line: body.start_position().row + 1,
-                    end_line: body.end_position().row + 1,
-                    fields,
-                    file_path: file_path.to_string(),
-                });
+            // Extract extends from interface heritage (interfaces can extend other interfaces)
+            let mut iface_extends = Vec::new();
+            if let Some(inode) = iface_node {
+                for child in children(inode) {
+                    if child.kind() == "extends_type_clause" {
+                        for type_node in children(child) {
+                            let kind = type_node.kind();
+                            if kind == "type_identifier" || kind == "generic_type" || kind == "nested_type_identifier" {
+                                iface_extends.push(node_text(type_node, source).to_string());
+                            }
+                        }
+                    }
+                }
             }
+
+            let nd = iface_node.unwrap_or_else(|| body_node.unwrap());
+            structs.push(DiscoveredStruct {
+                name: name.to_string(),
+                start_line: nd.start_position().row + 1,
+                end_line: nd.end_position().row + 1,
+                fields,
+                file_path: file_path.to_string(),
+                extends: iface_extends,
+                implements: vec![],
+                decorators: vec![],
+            });
         }
     }
 
@@ -727,6 +859,9 @@ fn ts_extract_class_methods(
             parameters: params,
             return_type,
             file_path: file_path.to_string(),
+            extends: vec![],
+            implements: vec![],
+            decorators: vec![],
         });
     }
 
@@ -847,7 +982,7 @@ fn go_extract_structs_and_methods(
                 continue;
             }
 
-            let fields = field_list_node
+            let (fields, embedded) = field_list_node
                 .map(|fl| go_extract_struct_fields(source, fl))
                 .unwrap_or_default();
 
@@ -858,6 +993,9 @@ fn go_extract_structs_and_methods(
                 end_line: nd.end_position().row + 1,
                 fields,
                 file_path: file_path.to_string(),
+                extends: embedded,
+                implements: vec![],
+                decorators: vec![],
             });
         }
     }
@@ -897,7 +1035,7 @@ fn go_extract_structs_and_methods(
                 continue;
             }
 
-            let fields = body_node
+            let (fields, iface_embedded) = body_node
                 .map(|b| go_extract_interface_methods(source, b))
                 .unwrap_or_default();
 
@@ -908,6 +1046,9 @@ fn go_extract_structs_and_methods(
                 end_line: nd.end_position().row + 1,
                 fields,
                 file_path: file_path.to_string(),
+                extends: iface_embedded,
+                implements: vec![],
+                decorators: vec![],
             });
         }
     }
@@ -970,6 +1111,9 @@ fn go_extract_structs_and_methods(
                 parameters,
                 return_type,
                 file_path: file_path.to_string(),
+                extends: vec![],
+                implements: vec![],
+                decorators: vec![],
             });
         }
     }
@@ -977,8 +1121,9 @@ fn go_extract_structs_and_methods(
     (structs, methods)
 }
 
-fn go_extract_struct_fields(source: &str, field_list: Node) -> Vec<Field> {
+fn go_extract_struct_fields(source: &str, field_list: Node) -> (Vec<Field>, Vec<String>) {
     let mut fields = Vec::new();
+    let mut embedded = Vec::new();
 
     for child in children(field_list) {
         if child.kind() != "field_declaration" {
@@ -1003,14 +1148,20 @@ fn go_extract_struct_fields(source: &str, field_list: Node) -> Vec<Field> {
                     description: String::new(),
                 });
             }
+        } else if !field_type.is_empty() {
+            // Embedded field (no name, just a type) — this is Go struct embedding
+            // Strip pointer prefix for the type name
+            let embed_name = field_type.trim_start_matches('*').to_string();
+            embedded.push(embed_name);
         }
     }
 
-    fields
+    (fields, embedded)
 }
 
-fn go_extract_interface_methods(source: &str, iface_body: Node) -> Vec<Field> {
+fn go_extract_interface_methods(source: &str, iface_body: Node) -> (Vec<Field>, Vec<String>) {
     let mut fields = Vec::new();
+    let mut embedded = Vec::new();
 
     for child in children(iface_body) {
         if child.kind() == "method_elem" || child.kind() == "method_spec" {
@@ -1030,10 +1181,13 @@ fn go_extract_interface_methods(source: &str, iface_body: Node) -> Vec<Field> {
                     description: String::new(),
                 });
             }
+        } else if child.kind() == "type_identifier" || child.kind() == "qualified_type" {
+            // Embedded interface (e.g. `io.Reader` inside an interface body)
+            embedded.push(node_text(child, source).to_string());
         }
     }
 
-    fields
+    (fields, embedded)
 }
 
 fn go_extract_receiver_type(source: &str, receiver_list: Node) -> String {
