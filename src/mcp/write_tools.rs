@@ -126,27 +126,69 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "refactor".into(),
+            name: "scan_model".into(),
+            description: "Scan the workspace source code (AST extraction) and populate \
+                          the actual model from what is really implemented. Guided by the \
+                          desired model's bounded contexts and module_path mappings."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "refactor_model".into(),
             description: "Manage the refactoring lifecycle between actual and desired domain models. \
                           Actions: \
                           'plan' (default) — diff actual vs desired and produce a full refactoring \
                           plan with code actions, file paths, priorities, and migration notes. \
                           'accept' — after implementing the refactoring, promote desired → actual. \
-                          'reset' — discard desired changes, revert desired → actual. \
-                          'scan' — scan the workspace source code (AST extraction) and populate \
-                          the actual model from what is really implemented. Guided by the desired \
-                          model's bounded contexts and module_path mappings."
+                          'reset' — discard desired changes, revert desired → actual."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["plan", "accept", "reset", "scan"],
+                        "enum": ["plan", "accept", "reset"],
                         "description": "Refactoring lifecycle action (default: plan)"
                     }
                 },
                 "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "assert_model".into(),
+            description: "Declare and evaluate formal architectural constraints. \
+                          Assign bounded contexts to layers (e.g., domain, application, infrastructure), \
+                          declare forbidden or allowed dependencies between layers or contexts, \
+                          list current policies, or evaluate all policy constraints to find violations."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["assign_layer", "remove_layer", "add_constraint", "remove_constraint", "list", "evaluate"],
+                        "description": "Policy action to perform"
+                    },
+                    "context": { "type": "string", "description": "Bounded context name (for assign_layer/remove_layer)" },
+                    "layer": { "type": "string", "description": "Layer name, e.g. 'domain', 'application', 'infrastructure' (for assign_layer)" },
+                    "constraint_kind": {
+                        "type": "string",
+                        "enum": ["layer", "context"],
+                        "description": "Whether the constraint applies to layers or specific contexts (for add_constraint/remove_constraint)"
+                    },
+                    "source": { "type": "string", "description": "Source layer or context name (for constraints)" },
+                    "target": { "type": "string", "description": "Target layer or context name (for constraints)" },
+                    "rule": {
+                        "type": "string",
+                        "enum": ["forbidden", "allowed"],
+                        "description": "Whether the dependency is forbidden or explicitly allowed (default: forbidden)"
+                    }
+                },
+                "required": ["action"]
             }),
         },
     ]
@@ -204,7 +246,50 @@ fn dispatch_write_tool(
             }
         }
 
-        "refactor" => {
+        "scan_model" => {
+            use crate::domain::analyze::scan_actual_model;
+
+            let workspace_root = std::path::Path::new(workspace_path);
+            let desired = store.load_desired(workspace_path).ok().flatten();
+
+            match scan_actual_model(workspace_root, desired.as_ref()) {
+                Ok(actual) => {
+                    let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
+                    let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
+                    let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
+                    let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
+                    let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
+
+                    match store.save_actual(workspace_path, &actual) {
+                        Ok(()) => {
+                            if store.load_desired(workspace_path).ok().flatten().is_none() {
+                                let _ = store.save_desired(workspace_path, &actual);
+                            }
+                            text_result(
+                                json!({
+                                    "status": "scanned",
+                                    "message": format!(
+                                        "Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events. Actual model updated.",
+                                        actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count
+                                    ),
+                                    "contexts_scanned": actual.bounded_contexts.len(),
+                                    "entities": entity_count,
+                                    "value_objects": vo_count,
+                                    "services": svc_count,
+                                    "repositories": repo_count,
+                                    "events": event_count,
+                                })
+                                .to_string(),
+                            )
+                        }
+                        Err(e) => error_result(format!("Scan succeeded but save failed: {e}")),
+                    }
+                }
+                Err(e) => error_result(format!("Scan failed: {e}")),
+            }
+        }
+
+        "refactor_model" => {
             let action = args
                 .get("action")
                 .and_then(|v| v.as_str())
@@ -261,45 +346,114 @@ fn dispatch_write_tool(
                     }
                 }
 
-                "scan" => {
-                    use crate::domain::analyze::scan_actual_model;
+                _ => error_result(format!("Unknown action '{action}'. Use 'plan', 'accept', or 'reset'.")),
+            }
+        }
 
-                    let workspace_root = std::path::Path::new(workspace_path);
-                    let desired = store.load_desired(workspace_path).ok().flatten();
+        "assert_model" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("list");
 
-                    match scan_actual_model(workspace_root, desired.as_ref()) {
-                        Ok(actual) => {
-                            let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
-                            let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
-                            let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
-                            let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
-                            let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
-
-                            match store.save_actual(workspace_path, &actual) {
-                                Ok(()) => text_result(
-                                    json!({
-                                        "status": "scanned",
-                                        "message": format!(
-                                            "Scanned {} contexts → {} entities, {} VOs, {} services, {} repos, {} events. Actual model updated.",
-                                            actual.bounded_contexts.len(), entity_count, vo_count, svc_count, repo_count, event_count
-                                        ),
-                                        "contexts_scanned": actual.bounded_contexts.len(),
-                                        "entities": entity_count,
-                                        "value_objects": vo_count,
-                                        "services": svc_count,
-                                        "repositories": repo_count,
-                                        "events": event_count,
-                                    })
-                                    .to_string(),
-                                ),
-                                Err(e) => error_result(format!("Scan succeeded but save failed: {e}")),
-                            }
-                        }
-                        Err(e) => error_result(format!("Scan failed: {e}")),
+            match action {
+                "assign_layer" => {
+                    let context = arg_str(args, "context");
+                    let layer = arg_str(args, "layer");
+                    if context.is_empty() {
+                        return error_result("'context' is required for assign_layer");
+                    }
+                    if layer.is_empty() {
+                        return error_result("'layer' is required for assign_layer");
+                    }
+                    match store.upsert_layer_assignment(workspace_path, &context, &layer) {
+                        Ok(()) => text_result(json!({
+                            "message": format!("Assigned context '{}' to layer '{}'", context, layer),
+                        }).to_string()),
+                        Err(e) => error_result(format!("Failed to assign layer: {e}")),
                     }
                 }
 
-                _ => error_result(format!("Unknown action '{action}'. Use 'plan', 'accept', 'reset', or 'scan'.")),
+                "remove_layer" => {
+                    let context = arg_str(args, "context");
+                    if context.is_empty() {
+                        return error_result("'context' is required for remove_layer");
+                    }
+                    match store.remove_layer_assignment(workspace_path, &context) {
+                        Ok(true) => text_result(format!("Removed layer assignment for context '{context}'")),
+                        Ok(false) => error_result(format!("No layer assignment found for context '{context}'")),
+                        Err(e) => error_result(format!("Failed to remove layer assignment: {e}")),
+                    }
+                }
+
+                "add_constraint" => {
+                    let constraint_kind = arg_str(args, "constraint_kind");
+                    let source = arg_str(args, "source");
+                    let target = arg_str(args, "target");
+                    let rule = args.get("rule").and_then(|v| v.as_str()).unwrap_or("forbidden");
+                    if constraint_kind.is_empty() || source.is_empty() || target.is_empty() {
+                        return error_result("'constraint_kind', 'source', and 'target' are required for add_constraint");
+                    }
+                    if constraint_kind != "layer" && constraint_kind != "context" {
+                        return error_result("'constraint_kind' must be 'layer' or 'context'");
+                    }
+                    if rule != "forbidden" && rule != "allowed" {
+                        return error_result("'rule' must be 'forbidden' or 'allowed'");
+                    }
+                    match store.upsert_dependency_constraint(workspace_path, &constraint_kind, &source, &target, rule) {
+                        Ok(()) => text_result(json!({
+                            "message": format!("{} dependency: {} → {} ({})", rule, source, target, constraint_kind),
+                        }).to_string()),
+                        Err(e) => error_result(format!("Failed to add constraint: {e}")),
+                    }
+                }
+
+                "remove_constraint" => {
+                    let constraint_kind = arg_str(args, "constraint_kind");
+                    let source = arg_str(args, "source");
+                    let target = arg_str(args, "target");
+                    if constraint_kind.is_empty() || source.is_empty() || target.is_empty() {
+                        return error_result("'constraint_kind', 'source', and 'target' are required for remove_constraint");
+                    }
+                    match store.remove_dependency_constraint(workspace_path, &constraint_kind, &source, &target) {
+                        Ok(true) => text_result(format!("Removed {constraint_kind} constraint: {source} → {target}")),
+                        Ok(false) => error_result(format!("No {constraint_kind} constraint found: {source} → {target}")),
+                        Err(e) => error_result(format!("Failed to remove constraint: {e}")),
+                    }
+                }
+
+                "list" => {
+                    let layers = store.list_layer_assignments(workspace_path).unwrap_or_default();
+                    let constraints = store.list_dependency_constraints(workspace_path).unwrap_or_default();
+
+                    let layer_items: Vec<Value> = layers.iter()
+                        .map(|(ctx, layer)| json!({"context": ctx, "layer": layer}))
+                        .collect();
+                    let constraint_items: Vec<Value> = constraints.iter()
+                        .map(|(kind, src, tgt, rule)| json!({
+                            "constraint_kind": kind,
+                            "source": src,
+                            "target": tgt,
+                            "rule": rule,
+                        }))
+                        .collect();
+
+                    text_result(json!({
+                        "layer_assignments": layer_items,
+                        "dependency_constraints": constraint_items,
+                    }).to_string())
+                }
+
+                "evaluate" => {
+                    match store.evaluate_policy_violations(workspace_path) {
+                        Ok(result) => text_result(result.to_string()),
+                        Err(e) => error_result(format!("Policy evaluation failed: {e}")),
+                    }
+                }
+
+                _ => error_result(format!(
+                    "Unknown action '{action}'. Use 'assign_layer', 'remove_layer', 'add_constraint', 'remove_constraint', 'list', or 'evaluate'."
+                )),
             }
         }
 
@@ -383,6 +537,9 @@ fn upsert_entity(store: &Store, workspace_path: &str, args: &Value) -> ToolCallR
         fields: vec![],
         methods: vec![],
         invariants: vec![],
+        file_path: None,
+        start_line: None,
+        end_line: None,
     });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { entity.description = desc.to_string(); }
     if let Some(agg) = args.get("aggregate_root").and_then(|v| v.as_bool()) { entity.aggregate_root = agg; }
@@ -422,7 +579,14 @@ fn upsert_service(store: &Store, workspace_path: &str, args: &Value) -> ToolCall
         Err(result) => return result,
     };
     let mut service = existing.clone().unwrap_or(Service {
-        name: svc_name.clone(), description: String::new(), kind: ServiceKind::Domain, methods: vec![], dependencies: vec![]
+        name: svc_name.clone(),
+        description: String::new(),
+        kind: ServiceKind::Domain,
+        methods: vec![],
+        dependencies: vec![],
+        file_path: None,
+        start_line: None,
+        end_line: None,
     });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { service.description = desc.to_string(); }
     if args.get("service_kind").is_some() { service.kind = parse_service_kind(&arg_str(args, "service_kind")); }
@@ -455,7 +619,7 @@ fn upsert_event(store: &Store, workspace_path: &str, args: &Value) -> ToolCallRe
         Ok(()) => store.query_event(workspace_path, &ctx_name, &event_name),
         Err(result) => return result,
     };
-    let mut event = existing.clone().unwrap_or(DomainEvent { name: event_name.clone(), description: String::new(), fields: vec![], source: String::new() });
+    let mut event = existing.clone().unwrap_or(DomainEvent { name: event_name.clone(), description: String::new(), fields: vec![], source: String::new(), file_path: None, start_line: None, end_line: None });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { event.description = desc.to_string(); }
     if let Some(src) = args.get("source").and_then(|v| v.as_str()) { event.source = src.to_string(); }
     if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut event.fields, fields); }
@@ -486,7 +650,7 @@ fn upsert_value_object(store: &Store, workspace_path: &str, args: &Value) -> Too
         Ok(()) => store.query_value_object(workspace_path, &ctx_name, &vo_name),
         Err(result) => return result,
     };
-    let mut value_object = existing.clone().unwrap_or(ValueObject { name: vo_name.clone(), description: String::new(), fields: vec![], validation_rules: vec![] });
+    let mut value_object = existing.clone().unwrap_or(ValueObject { name: vo_name.clone(), description: String::new(), fields: vec![], validation_rules: vec![], file_path: None, start_line: None, end_line: None });
     if let Some(desc) = args.get("description").and_then(|v| v.as_str()) { value_object.description = desc.to_string(); }
     if let Some(fields) = args.get("fields").and_then(|v| v.as_array()) { merge_fields(&mut value_object.fields, fields); }
     if let Some(rules) = args.get("validation_rules").and_then(|v| v.as_array()) {
@@ -523,7 +687,7 @@ fn upsert_repository(store: &Store, workspace_path: &str, args: &Value) -> ToolC
         Ok(()) => store.query_repository(workspace_path, &ctx_name, &repo_name),
         Err(result) => return result,
     };
-    let mut repository = existing.clone().unwrap_or(Repository { name: repo_name.clone(), aggregate: String::new(), methods: vec![] });
+    let mut repository = existing.clone().unwrap_or(Repository { name: repo_name.clone(), aggregate: String::new(), methods: vec![], file_path: None, start_line: None, end_line: None });
     if let Some(agg) = args.get("aggregate").and_then(|v| v.as_str()) { repository.aggregate = agg.to_string(); }
     if let Some(methods) = args.get("methods").and_then(|v| v.as_array()) { merge_methods(&mut repository.methods, methods); }
     if let Err(e) = store.upsert_repository(workspace_path, &ctx_name, &repository) {
@@ -839,6 +1003,9 @@ fn parse_methods(val: Option<&Value>) -> Vec<Method> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string(),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     })
                 })
                 .collect()
@@ -991,8 +1158,8 @@ fn enrich_plan(store: &Store, workspace_path: &str, changes: &[Value]) -> Value 
         "migration_notes": [
             "Apply changes in priority order (0 = highest).",
             "Context-level changes should be done before entity/service changes.",
-            "Run `refactor scan` after implementing to update the actual model.",
-            "Run `refactor accept` when implementation matches the desired model."
+            "Run `scan_model` after implementing to update the actual model.",
+            "Run `refactor_model accept` when implementation matches the desired model."
         ]
     })
 }
@@ -1035,12 +1202,16 @@ mod tests {
                     }],
                     methods: vec![],
                     invariants: vec!["Email must be unique".into()],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
                 value_objects: vec![],
                 services: vec![],
                 api_endpoints: vec![],
                 repositories: vec![],
                 events: vec![],
+                modules: vec![],
                 dependencies: vec![],
             }],
             external_systems: vec![],
@@ -1061,7 +1232,7 @@ mod tests {
 
     #[test]
     fn test_list_write_tools_count() {
-        assert_eq!(list_write_tools().len(), 2);
+        assert_eq!(list_write_tools().len(), 4);
     }
 
     #[test]
@@ -1395,7 +1566,7 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("pending_changes"));
     }
@@ -1407,10 +1578,10 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("pending_changes"));
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("pending_changes"));
     }
@@ -1422,10 +1593,10 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Updated"}),
         );
-        let result = call_write_tool(ws, &store, "refactor", &json!({"action": "accept"}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({"action": "accept"}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("accepted"));
-        let result = call_write_tool(ws, &store, "refactor", &json!({}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("in_sync"));
     }
@@ -1437,13 +1608,13 @@ mod tests {
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Identity", "description": "Original"}),
         );
-        call_write_tool(ws, &store, "refactor", &json!({"action": "accept"}));
+        call_write_tool(ws, &store, "refactor_model", &json!({"action": "accept"}));
         call_write_tool(ws, &store, "set_model",
             &json!({"kind": "bounded_context", "name": "Billing", "description": "New context"}),
         );
         let desired = store.load_desired(ws).unwrap().unwrap();
         assert_eq!(desired.bounded_contexts.len(), 2);
-        let result = call_write_tool(ws, &store, "refactor", &json!({"action": "reset"}));
+        let result = call_write_tool(ws, &store, "refactor_model", &json!({"action": "reset"}));
         let text = match &result.content[0] { ContentBlock::Text { text } => text };
         assert!(text.contains("reset"));
         let reset = store.load_desired(ws).unwrap().unwrap();

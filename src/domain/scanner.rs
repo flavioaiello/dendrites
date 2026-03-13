@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use super::analyze::{DiscoveredMethod, DiscoveredStruct, LiveDependency};
+use super::analyze::{LiveDependency, ScanResult};
 
 /// A trait that defines how to parse source files into generic domain intelligence artifacts
 /// mapping code structures into the `dendrites` graph-based boundary systems.
@@ -15,10 +15,10 @@ pub trait AstScanner {
         source_code: &str,
     ) -> Result<Vec<LiveDependency>>;
 
-    /// Parses the file to find types (classes/structs) and their behaviors (methods/functions)
+    /// Parses the file to find types (classes/structs), enums, modules, and their behaviors (methods/functions)
     fn scan_file(
         &self,
         file_path: &Path,
         source_code: &str,
-    ) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)>;
+    ) -> Result<ScanResult>;
 }

@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use syn::visit::Visit;
+use syn::spanned::Spanned;
 
-use super::analyze::{DiscoveredMethod, DiscoveredStruct, LiveDependency};
+use super::analyze::{DiscoveredEnum, DiscoveredMethod, DiscoveredModule, DiscoveredStruct, LiveDependency, ScanResult};
 use super::model::Field;
 use super::scanner::AstScanner;
 
@@ -72,23 +73,36 @@ impl AstScanner for RustSynScanner {
         &self,
         file_path: &Path,
         source_code: &str,
-    ) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)> {
+    ) -> Result<ScanResult> {
         let syntax_tree = syn::parse_file(source_code)
             .with_context(|| format!("Failed to parse: {}", file_path.display()))?;
 
         let mut visitor = StructMethodVisitor {
             structs: vec![],
+            enums: vec![],
             methods: vec![],
+            modules: vec![],
             file_path: file_path.to_string_lossy().to_string(),
         };
         visitor.visit_file(&syntax_tree);
 
-        Ok((visitor.structs, visitor.methods))
+        Ok((visitor.structs, visitor.enums, visitor.methods, visitor.modules))
     }
 }
 
 fn is_public(vis: &syn::Visibility) -> bool {
     matches!(vis, syn::Visibility::Public(_))
+}
+
+fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        attr.parse_args::<syn::Ident>()
+            .map(|ident| ident == "test")
+            .unwrap_or(false)
+    })
 }
 
 fn type_to_string(ty: &syn::Type) -> String {
@@ -104,7 +118,9 @@ fn is_option_type(ty: &syn::Type) -> bool {
 
 struct StructMethodVisitor {
     structs: Vec<DiscoveredStruct>,
+    enums: Vec<DiscoveredEnum>,
     methods: Vec<DiscoveredMethod>,
+    modules: Vec<DiscoveredModule>,
     file_path: String,
 }
 
@@ -150,11 +166,76 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
 
         self.structs.push(DiscoveredStruct {
             name,
+            start_line: node.span().start().line,
+            end_line: node.span().end().line,
             fields,
             file_path: self.file_path.clone(),
         });
 
         syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        if !is_public(&node.vis) || has_cfg_test(&node.attrs) {
+            return;
+        }
+
+        let name = node.ident.to_string();
+        let variants = node
+            .variants
+            .iter()
+            .map(|v| {
+                let variant_name = v.ident.to_string();
+                let variant_type = match &v.fields {
+                    syn::Fields::Unit => "()".to_string(),
+                    syn::Fields::Unnamed(u) => {
+                        let types: Vec<String> =
+                            u.unnamed.iter().map(|f| type_to_string(&f.ty)).collect();
+                        types.join(", ")
+                    }
+                    syn::Fields::Named(n) => {
+                        let parts: Vec<String> = n
+                            .named
+                            .iter()
+                            .filter_map(|f| {
+                                let fname = f.ident.as_ref()?.to_string();
+                                Some(format!("{}: {}", fname, type_to_string(&f.ty)))
+                            })
+                            .collect();
+                        format!("{{ {} }}", parts.join(", "))
+                    }
+                };
+                Field {
+                    name: variant_name,
+                    field_type: variant_type,
+                    required: true,
+                    description: String::new(),
+                }
+            })
+            .collect();
+
+        self.enums.push(DiscoveredEnum {
+            name,
+            start_line: node.span().start().line,
+            end_line: node.span().end().line,
+            variants,
+            file_path: self.file_path.clone(),
+        });
+
+        syn::visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let name = node.ident.to_string();
+        if name == "tests" || has_cfg_test(&node.attrs) {
+            return;
+        }
+        self.modules.push(DiscoveredModule {
+            name,
+            public: is_public(&node.vis),
+            file_path: self.file_path.clone(),
+        });
+        syn::visit::visit_item_mod(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
@@ -176,30 +257,6 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
                     syn::ReturnType::Default => String::new(),
                     syn::ReturnType::Type(_, ty) => type_to_string(ty),
                 };
-
-                let mut pre_conditions = Vec::new();
-                let mut post_conditions = Vec::new();
-
-                for attr in &method.attrs {
-                    if attr.path().is_ident("doc") {
-                        if let syn::Meta::NameValue(meta) = &attr.meta {
-                            if let syn::Expr::Lit(expr_lit) = &meta.value {
-                                if let syn::Lit::Str(lit_str) = &expr_lit.lit {
-                                    let doc_str = lit_str.value().trim().to_string();
-                                    if let Some(req) = doc_str.strip_prefix("Requires: ") {
-                                        pre_conditions.push(req.trim().to_string());
-                                    } else if let Some(req) = doc_str.strip_prefix("requires: ") {
-                                        pre_conditions.push(req.trim().to_string());
-                                    } else if let Some(ens) = doc_str.strip_prefix("Ensures: ") {
-                                        post_conditions.push(ens.trim().to_string());
-                                    } else if let Some(ens) = doc_str.strip_prefix("ensures: ") {
-                                        post_conditions.push(ens.trim().to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
 
                 let parameters: Vec<Field> = method
                     .sig
@@ -229,11 +286,11 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
                 self.methods.push(DiscoveredMethod {
                     owner: owner.clone(),
                     name,
+                    start_line: method.span().start().line,
+                    end_line: method.span().end().line,
                     parameters,
                     return_type,
                     file_path: self.file_path.clone(),
-                    pre_conditions,
-                    post_conditions,
                 });
             }
         }

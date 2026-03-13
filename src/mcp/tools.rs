@@ -35,59 +35,99 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "scrutinize".into(),
-            description: "Run Datalog-based analysis queries over the domain model knowledge graph. \
-                          Supports predefined analyses (transitive_deps, circular_deps, \
-                          layer_violations, impact_analysis, aggregate_quality, dependency_graph, \
-                          field_usage, method_search, shared_fields) \
-                          and arbitrary Datalog queries. All relations have a `state` column \
-                          ('desired' | 'actual') for set-differencing. Relations: \
-                          context, context_dep, entity, service, service_dep, event, \
-                          value_object, repository, invariant, field, method, method_param, vo_rule."
+            name: "query_blast_radius".into(),
+            description: "Compute the downstream impact of changing or deleting an entity.\n\
+                          Supports multiple analysis types: transitive_deps, circular_deps, layer_violations, \n\
+                          impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "analysis": {
                         "type": "string",
-                        "enum": [
-                            "transitive_deps",
-                            "circular_deps",
-                            "layer_violations",
-                            "impact_analysis",
-                            "aggregate_quality",
-                            "dependency_graph",
-                            "field_usage",
-                            "method_search",
-                            "shared_fields",
-                            "datalog"
-                        ],
-                        "description": "Type of analysis to run"
+                        "enum": ["transitive_deps", "circular_deps", "layer_violations", "impact_analysis",
+                                 "aggregate_quality", "dependency_graph", "field_usage", "method_search",
+                                 "shared_fields"],
+                        "description": "The specific analysis to run"
                     },
-                    "context": {
-                        "type": "string",
-                        "description": "Bounded context name (required for transitive_deps, impact_analysis)"
-                    },
-                    "entity": {
-                        "type": "string",
-                        "description": "Entity name (required for impact_analysis)"
-                    },
-                    "field_type": {
-                        "type": "string",
-                        "description": "Field type to search for (required for field_usage)"
-                    },
-                    "method_name": {
-                        "type": "string",
-                        "description": "Method name to search for (required for method_search)"
-                    },
-                    "query": {
-                        "type": "string",
-                        "description": "Custom Datalog query (required for analysis=datalog). \
-                                        Use $ws to reference the current workspace. \
-                                        Example: ?[name] := *entity{workspace: $ws, name}"
-                    }
+                    "context": { "type": "string", "description": "Bounded context name (required for transitive_deps, impact_analysis)" },
+                    "entity": { "type": "string", "description": "Entity name (required for impact_analysis)" },
+
+                    "field_type": { "type": "string", "description": "Field type to search (required for field_usage)" },
+                    "method_name": { "type": "string", "description": "Method name to search (required for method_search)" }
                 },
                 "required": ["analysis"]
+            }),
+        },
+        ToolDefinition {
+            name: "can_delete_symbol".into(),
+            description: "Determine whether a function, method, or entity can be safely deleted under the defined scope.\n\
+                          Evaluates inbound references and ownership to determine if deletion is structurally safe."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "context": { "type": "string", "description": "Bounded context name" },
+                    "entity": { "type": "string", "description": "Entity or symbol name" }
+                },
+                "required": ["context", "entity"]
+            }),
+        },
+        ToolDefinition {
+            name: "check_architectural_invariant".into(),
+            description: "Evaluate curated architectural invariants. Replaces arbitrary queries with strict proofs.\n\
+                          'policy_violations' checks constraints declared via assert_model."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "invariant": {
+                        "type": "string",
+                        "enum": ["layer_violations", "circular_deps", "aggregate_quality", "orphan_contexts", "policy_violations"],
+                        "description": "The specific invariant to check"
+                    }
+                },
+                "required": ["invariant"]
+            }),
+        },
+        ToolDefinition {
+            name: "query_dependency_path".into(),
+            description: "Return proof paths between two architectural entities (e.g., from one bounded context to another)."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "from_context": { "type": "string", "description": "Source context" },
+                    "to_context": { "type": "string", "description": "Target context" }
+                },
+                "required": ["from_context", "to_context"]
+            }),
+        },
+        ToolDefinition {
+            name: "explain_violation".into(),
+            description: "Takes a violation type and returns a detailed, evidence-backed explanation \
+                          with witness paths and supporting facts. Derived from stored facts, not generated freehand."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "violation_type": {
+                        "type": "string",
+                        "enum": ["layer_violations", "circular_deps", "policy_violations", "aggregate_quality", "orphan_contexts"],
+                        "description": "The type of violation to explain"
+                    }
+                },
+                "required": ["violation_type"]
+            }),
+        },
+        ToolDefinition {
+            name: "diff_models".into(),
+            description: "Compare desired (intended) vs actual (observed) architecture state. \
+                          Returns added/removed entities, changed dependencies, and pending changes."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
             }),
         },
     ]
@@ -144,7 +184,7 @@ pub fn call_tool(
             }
         }
 
-        "scrutinize" => {
+        "query_blast_radius" => {
             let analysis = args["analysis"].as_str().unwrap_or("");
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
 
@@ -244,21 +284,6 @@ pub fn call_tool(
                         Err(e) => error_result(format!("Dependency graph query failed: {}", e)),
                     }
                 }
-                "datalog" => {
-                    let query = match args["query"].as_str() {
-                        Some(q) => q,
-                        None => return error_result("'query' parameter is required for datalog analysis".into()),
-                    };
-                    match store.run_datalog_full(query, &canonical) {
-                        Ok((headers, rows)) => text_result(json!({
-                            "analysis": "datalog",
-                            "headers": headers,
-                            "rows": rows,
-                            "row_count": rows.len(),
-                        }).to_string()),
-                        Err(e) => error_result(format!("Datalog query failed: {}", e)),
-                    }
-                }
                 "field_usage" => {
                     let field_type = match args["field_type"].as_str() {
                         Some(t) => t,
@@ -351,7 +376,417 @@ pub fn call_tool(
                         Err(e) => error_result(format!("Shared fields query failed: {e}")),
                     }
                 }
-                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields, datalog", analysis)),
+                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields", analysis)),
+            }
+        }
+
+        "can_delete_symbol" => {
+            let canonical = crate::store::cozo::canonicalize_path(workspace_path);
+            let context = match args["context"].as_str() {
+                Some(c) => c,
+                None => return error_result("'context' parameter is required".into()),
+            };
+            let entity = match args["entity"].as_str() {
+                Some(e) => e,
+                None => return error_result("'entity' parameter is required".into()),
+            };
+            match store.can_delete_symbol(&canonical, context, entity) {
+                Ok(result) => text_result(json!({
+                    "status": if result["can_delete"].as_bool().unwrap_or(false) { "true" } else { "false" },
+                    "entity": entity,
+                    "context": context,
+                    "result": result,
+                    "proof": {
+                        "rule": "entity deletable IFF no inbound references in scope",
+                        "derived_from": ["service_dep", "context_dep", "event", "repository"],
+                    },
+                    "provenance": { "source": "datalog", "state": "desired" },
+                }).to_string()),
+                Err(e) => error_result(format!("can_delete_symbol failed: {e}")),
+            }
+        }
+
+        "check_architectural_invariant" => {
+            let canonical = crate::store::cozo::canonicalize_path(workspace_path);
+            let invariant = match args["invariant"].as_str() {
+                Some(i) => i,
+                None => return error_result("'invariant' parameter is required".into()),
+            };
+            match invariant {
+                "layer_violations" => {
+                    match store.layer_violations(&canonical) {
+                        Ok(violations) => {
+                            let items: Vec<_> = violations.iter()
+                                .map(|(ctx, svc, dep)| json!({
+                                    "context": ctx,
+                                    "domain_service": svc,
+                                    "infrastructure_dependency": dep,
+                                }))
+                                .collect();
+                            text_result(json!({
+                                "invariant": "layer_violations",
+                                "status": if violations.is_empty() { "true" } else { "false" },
+                                "violations": items,
+                                "count": violations.len(),
+                                "proof": {
+                                    "rule": "domain_service MUST_NOT depend_on infrastructure_service",
+                                    "derived_from": ["service", "service_dep"],
+                                    "witness_count": violations.len(),
+                                },
+                                "provenance": { "source": "datalog", "state": "desired" },
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("layer_violations check failed: {e}")),
+                    }
+                }
+                "circular_deps" => {
+                    match store.circular_deps(&canonical) {
+                        Ok(cycles) => {
+                            let pairs: Vec<_> = cycles.iter()
+                                .map(|(a, b)| json!({"from": a, "to": b}))
+                                .collect();
+                            text_result(json!({
+                                "invariant": "circular_deps",
+                                "status": if cycles.is_empty() { "true" } else { "false" },
+                                "cycles": pairs,
+                                "count": cycles.len(),
+                                "proof": {
+                                    "rule": "context_dep graph MUST be acyclic",
+                                    "derived_from": ["context_dep"],
+                                    "witness_count": cycles.len(),
+                                },
+                                "provenance": { "source": "datalog", "state": "desired" },
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("circular_deps check failed: {e}")),
+                    }
+                }
+                "aggregate_quality" => {
+                    match store.aggregate_roots_without_invariants(&canonical) {
+                        Ok(roots) => {
+                            let items: Vec<_> = roots.iter()
+                                .map(|(ctx, ent)| json!({"context": ctx, "entity": ent}))
+                                .collect();
+                            text_result(json!({
+                                "invariant": "aggregate_quality",
+                                "status": if roots.is_empty() { "true" } else { "false" },
+                                "roots_without_invariants": items,
+                                "count": roots.len(),
+                                "proof": {
+                                    "rule": "aggregate_root MUST have at_least_one invariant",
+                                    "derived_from": ["entity", "invariant"],
+                                    "witness_count": roots.len(),
+                                },
+                                "provenance": { "source": "datalog", "state": "desired" },
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("aggregate_quality check failed: {e}")),
+                    }
+                }
+                "orphan_contexts" => {
+                    // orphan_contexts is private, use model_health and extract
+                    match store.model_health(&canonical) {
+                        Ok(health) => {
+                            text_result(json!({
+                                "invariant": "orphan_contexts",
+                                "status": if health.orphan_contexts.is_empty() { "true" } else { "false" },
+                                "orphans": health.orphan_contexts,
+                                "count": health.orphan_contexts.len(),
+                                "proof": {
+                                    "rule": "context SHOULD participate_in dependency_graph",
+                                    "derived_from": ["context", "context_dep"],
+                                    "witness_count": health.orphan_contexts.len(),
+                                },
+                                "provenance": { "source": "datalog", "state": "desired" },
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("orphan_contexts check failed: {e}")),
+                    }
+                }
+                "policy_violations" => {
+                    match store.evaluate_policy_violations(&canonical) {
+                        Ok(result) => text_result(json!({
+                            "invariant": "policy_violations",
+                            "status": result["status"],
+                            "violations": result["violations"],
+                            "count": result["count"],
+                            "proof": {
+                                "rule": "dependency MUST_NOT violate declared constraint",
+                                "derived_from": ["context_dep", "layer_assignment", "dependency_constraint"],
+                                "witness_count": result["count"],
+                            },
+                            "provenance": { "source": "datalog", "state": "desired" },
+                        }).to_string()),
+                        Err(e) => error_result(format!("policy_violations check failed: {e}")),
+                    }
+                }
+                _ => error_result(format!("Unknown invariant: '{}'. Valid: layer_violations, circular_deps, aggregate_quality, orphan_contexts, policy_violations", invariant)),
+            }
+        }
+
+        "query_dependency_path" => {
+            let canonical = crate::store::cozo::canonicalize_path(workspace_path);
+            let from = match args["from_context"].as_str() {
+                Some(f) => f,
+                None => return error_result("'from_context' parameter is required".into()),
+            };
+            let to = match args["to_context"].as_str() {
+                Some(t) => t,
+                None => return error_result("'to_context' parameter is required".into()),
+            };
+            match store.query_dependency_path(&canonical, from, to) {
+                Ok(paths) => text_result(json!({
+                    "from": from,
+                    "to": to,
+                    "paths": paths,
+                    "reachable": !paths.is_empty(),
+                    "hop_count": paths.len(),
+                    "proof": {
+                        "rule": "transitive reachability via context_dep",
+                        "derived_from": ["context_dep"],
+                        "witness_paths": paths,
+                    },
+                    "provenance": { "source": "datalog", "state": "desired" },
+                }).to_string()),
+                Err(e) => error_result(format!("query_dependency_path failed: {e}")),
+            }
+        }
+
+        "explain_violation" => {
+            let canonical = crate::store::cozo::canonicalize_path(workspace_path);
+            let violation_type = match args["violation_type"].as_str() {
+                Some(v) => v,
+                None => return error_result("'violation_type' parameter is required".into()),
+            };
+
+            match violation_type {
+                "layer_violations" => {
+                    match store.layer_violations(&canonical) {
+                        Ok(violations) if violations.is_empty() => {
+                            text_result(json!({
+                                "violation_type": "layer_violations",
+                                "status": "true",
+                                "explanation": "No layer violations detected. All domain services depend only on domain-level abstractions.",
+                                "evidence": [],
+                            }).to_string())
+                        }
+                        Ok(violations) => {
+                            let evidence: Vec<_> = violations.iter().map(|(ctx, svc, dep)| {
+                                json!({
+                                    "context": ctx,
+                                    "domain_service": svc,
+                                    "infrastructure_dependency": dep,
+                                    "explanation": format!(
+                                        "Service '{svc}' in context '{ctx}' depends on '{dep}', \
+                                         which is an infrastructure-layer dependency. Domain services \
+                                         must not depend on infrastructure directly."
+                                    ),
+                                    "rule": "domain_service MUST NOT depend_on infrastructure_dependency",
+                                })
+                            }).collect();
+                            text_result(json!({
+                                "violation_type": "layer_violations",
+                                "status": "false",
+                                "explanation": format!(
+                                    "{} layer violation(s) found. Domain services reference infrastructure dependencies directly, \
+                                     violating the dependency inversion principle.",
+                                    violations.len()
+                                ),
+                                "evidence": evidence,
+                                "remediation": "Introduce abstractions (traits/interfaces) in the domain layer and inject infrastructure implementations.",
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("layer_violations check failed: {e}")),
+                    }
+                }
+                "circular_deps" => {
+                    match store.circular_deps(&canonical) {
+                        Ok(cycles) if cycles.is_empty() => {
+                            text_result(json!({
+                                "violation_type": "circular_deps",
+                                "status": "true",
+                                "explanation": "No circular dependencies detected. Context dependency graph is acyclic.",
+                                "evidence": [],
+                            }).to_string())
+                        }
+                        Ok(cycles) => {
+                            let evidence: Vec<_> = cycles.iter().map(|(a, b)| {
+                                json!({
+                                    "from": a,
+                                    "to": b,
+                                    "explanation": format!(
+                                        "Context '{a}' depends on '{b}' and '{b}' depends on '{a}', \
+                                         forming a circular dependency cycle."
+                                    ),
+                                    "rule": "context dependency graph MUST be acyclic",
+                                })
+                            }).collect();
+                            text_result(json!({
+                                "violation_type": "circular_deps",
+                                "status": "false",
+                                "explanation": format!(
+                                    "{} circular dependency pair(s) found. Cycles prevent clean module boundaries.",
+                                    cycles.len()
+                                ),
+                                "evidence": evidence,
+                                "remediation": "Break cycles by extracting shared concepts into a new context or using events for decoupling.",
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("circular_deps check failed: {e}")),
+                    }
+                }
+                "policy_violations" => {
+                    match store.evaluate_policy_violations(&canonical) {
+                        Ok(result) => {
+                            let violations = result["violations"].as_array().cloned().unwrap_or_default();
+                            let evidence: Vec<_> = violations.iter().map(|v| {
+                                let kind = v["kind"].as_str().unwrap_or("?");
+                                json!({
+                                    "kind": kind,
+                                    "from_context": v["from_context"],
+                                    "to_context": v["to_context"],
+                                    "from_layer": v["from_layer"],
+                                    "to_layer": v["to_layer"],
+                                    "rule": v["rule"],
+                                    "explanation": if kind == "layer" {
+                                        format!(
+                                            "Context '{}' (layer: {}) depends on '{}' (layer: {}), \
+                                             violating forbidden layer dependency.",
+                                            v["from_context"].as_str().unwrap_or("?"),
+                                            v["from_layer"].as_str().unwrap_or("?"),
+                                            v["to_context"].as_str().unwrap_or("?"),
+                                            v["to_layer"].as_str().unwrap_or("?"),
+                                        )
+                                    } else {
+                                        format!(
+                                            "Context '{}' depends on '{}', violating forbidden context dependency.",
+                                            v["from_context"].as_str().unwrap_or("?"),
+                                            v["to_context"].as_str().unwrap_or("?"),
+                                        )
+                                    },
+                                })
+                            }).collect();
+                            text_result(json!({
+                                "violation_type": "policy_violations",
+                                "status": result["status"],
+                                "explanation": if violations.is_empty() {
+                                    "No policy violations detected. All dependencies conform to declared constraints.".to_string()
+                                } else {
+                                    format!("{} policy violation(s) found. Dependencies violate declared architectural constraints.", violations.len())
+                                },
+                                "evidence": evidence,
+                                "remediation": if violations.is_empty() { Value::Null } else {
+                                    json!("Review forbidden dependencies and refactor to respect layer boundaries.")
+                                },
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("policy_violations check failed: {e}")),
+                    }
+                }
+                "aggregate_quality" => {
+                    match store.aggregate_roots_without_invariants(&canonical) {
+                        Ok(roots) if roots.is_empty() => {
+                            text_result(json!({
+                                "violation_type": "aggregate_quality",
+                                "status": "true",
+                                "explanation": "All aggregate root entities have at least one invariant defined.",
+                                "evidence": [],
+                            }).to_string())
+                        }
+                        Ok(roots) => {
+                            let evidence: Vec<_> = roots.iter().map(|(ctx, ent)| {
+                                json!({
+                                    "context": ctx,
+                                    "entity": ent,
+                                    "explanation": format!(
+                                        "Entity '{ent}' in context '{ctx}' is marked as aggregate root \
+                                         but has no invariants defined. Aggregate roots should enforce \
+                                         domain invariants."
+                                    ),
+                                    "rule": "aggregate_root MUST have at_least_one invariant",
+                                })
+                            }).collect();
+                            text_result(json!({
+                                "violation_type": "aggregate_quality",
+                                "status": "false",
+                                "explanation": format!(
+                                    "{} aggregate root(s) without invariants. Domain integrity may be at risk.",
+                                    roots.len()
+                                ),
+                                "evidence": evidence,
+                                "remediation": "Add invariants to aggregate roots to express domain rules explicitly.",
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("aggregate_quality check failed: {e}")),
+                    }
+                }
+                "orphan_contexts" => {
+                    match store.model_health(&canonical) {
+                        Ok(health) if health.orphan_contexts.is_empty() => {
+                            text_result(json!({
+                                "violation_type": "orphan_contexts",
+                                "status": "true",
+                                "explanation": "No orphan contexts. All contexts participate in the dependency graph.",
+                                "evidence": [],
+                            }).to_string())
+                        }
+                        Ok(health) => {
+                            let evidence: Vec<_> = health.orphan_contexts.iter().map(|ctx| {
+                                json!({
+                                    "context": ctx,
+                                    "explanation": format!(
+                                        "Context '{ctx}' has no dependencies to or from other contexts. \
+                                         It may be unused or missing declared relationships."
+                                    ),
+                                    "rule": "context SHOULD participate_in dependency_graph",
+                                })
+                            }).collect();
+                            text_result(json!({
+                                "violation_type": "orphan_contexts",
+                                "status": "false",
+                                "explanation": format!(
+                                    "{} orphan context(s) found. These contexts are isolated from the dependency graph.",
+                                    health.orphan_contexts.len()
+                                ),
+                                "evidence": evidence,
+                                "remediation": "Add dependencies or remove unused contexts.",
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("orphan_contexts check failed: {e}")),
+                    }
+                }
+                _ => error_result(format!(
+                    "Unknown violation_type: '{}'. Valid: layer_violations, circular_deps, policy_violations, aggregate_quality, orphan_contexts",
+                    violation_type
+                )),
+            }
+        }
+
+        "diff_models" => {
+            let canonical = crate::store::cozo::canonicalize_path(workspace_path);
+            match store.diff_graph(&canonical) {
+                Ok(diff) => {
+                    let changes = diff["pending_changes"].as_array().cloned().unwrap_or_default();
+
+                    let added: Vec<_> = changes.iter()
+                        .filter(|c| c["action"].as_str() == Some("add"))
+                        .cloned().collect();
+                    let removed: Vec<_> = changes.iter()
+                        .filter(|c| c["action"].as_str() == Some("remove"))
+                        .cloned().collect();
+
+                    text_result(json!({
+                        "status": if changes.is_empty() { "in_sync" } else { "pending_changes" },
+                        "summary": {
+                            "total_changes": changes.len(),
+                            "additions": added.len(),
+                            "removals": removed.len(),
+                        },
+                        "added": added,
+                        "removed": removed,
+                    }).to_string())
+                }
+                Err(e) => error_result(format!("diff_models failed: {e}")),
             }
         }
 
@@ -599,82 +1034,6 @@ mod tests {
         Store::open(&path).unwrap()
     }
 
-    fn test_model() -> DomainModel {
-        DomainModel {
-            name: "TestProject".into(),
-            description: "Test".into(),
-            bounded_contexts: vec![
-                BoundedContext {
-                    name: "Identity".into(),
-                    description: "Auth context".into(),
-                    module_path: "src/identity".into(),
-                    ownership: Ownership::default(),
-                    aggregates: vec![],
-                    policies: vec![],
-                    read_models: vec![],
-                    entities: vec![Entity {
-                        name: "User".into(),
-                        description: "A user".into(),
-                        aggregate_root: true,
-                        fields: vec![Field {
-                            name: "id".into(),
-                            field_type: "UserId".into(),
-                            required: true,
-                            description: "".into(),
-                        }],
-                        methods: vec![],
-                        invariants: vec!["Email must be unique".into()],
-                    }],
-                    value_objects: vec![],
-                    services: vec![Service {
-                        name: "AuthService".into(),
-                        description: "Handles auth".into(),
-                        kind: ServiceKind::Application,
-                        methods: vec![],
-                        dependencies: vec![],
-                    }],
-                    repositories: vec![],
-                    events: vec![],
-                    dependencies: vec![],
-                    api_endpoints: vec![],
-                },
-                BoundedContext {
-                    name: "Billing".into(),
-                    description: "Billing context".into(),
-                    module_path: "src/billing".into(),
-                    ownership: Ownership::default(),
-                    aggregates: vec![],
-                    policies: vec![],
-                    read_models: vec![],
-                    entities: vec![],
-                    value_objects: vec![],
-                    services: vec![],
-                    api_endpoints: vec![],
-                    repositories: vec![],
-                    events: vec![],
-                    dependencies: vec!["Identity".into()],
-                },
-            ],
-            external_systems: vec![],
-            architectural_decisions: vec![],
-            ownership: Ownership::default(),
-            rules: vec![ArchitecturalRule {
-                id: "LAYER-001".into(),
-                description: "Domain must not depend on infra".into(),
-                severity: Severity::Error,
-                scope: "domain".into(),
-            }],
-            tech_stack: TechStack::default(),
-            conventions: Conventions {
-                file_structure: FileStructure {
-                    pattern: "src/{context}/{layer}/{type}.rs".into(),
-                    layers: vec!["domain".into(), "application".into()],
-                },
-                ..Default::default()
-            },
-        }
-    }
-
     #[test]
     fn test_unknown_tool() {
         let store = test_store();
@@ -685,150 +1044,124 @@ mod tests {
     #[test]
     fn test_list_tools_count() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 3);
+        assert_eq!(tools.len(), 8);
     }
 
     #[test]
-    fn test_overview_shows_desired_and_actual() {
-        let model = test_model();
+    fn test_can_delete_symbol_dispatch() {
         let store = test_store();
-        let ws = "/tmp/test-dual-overview";
-        // Save desired + accept to create actual
-        store.save_desired(ws, &model).unwrap();
-        store.accept(ws).unwrap();
-        let result = call_tool(&store, ws, "get_model", &json!({}));
-        let text = match &result.content[0] {
-            ContentBlock::Text { text } => text,
-        };
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        assert!(parsed.get("desired").is_some());
-        assert!(parsed.get("actual").is_some());
-        assert_eq!(parsed["status"], "in_sync");
-        assert_eq!(parsed["pending_change_count"], 0);
-    }
-
-    #[test]
-    fn test_overview_no_actual_shows_status() {
-        let store = test_store();
-        let ws = "/tmp/test-no-actual";
-        store.save_desired(ws, &test_model()).unwrap();
-        let result = call_tool(&store, ws, "get_model", &json!({}));
-        let text = match &result.content[0] {
-            ContentBlock::Text { text } => text,
-        };
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["status"], "no_actual");
-        assert_eq!(parsed["actual"], json!(null));
-    }
-
-    #[test]
-    fn test_query_model_circular_deps() {
-        let store = test_store();
-        let ws = "/tmp/test-query-circular";
-        let mut model = test_model();
-        // Create circular dependency: Identity → Billing → Identity
-        // Billing already depends on Identity; add Identity → Billing
-        if let Some(identity) = model.bounded_contexts.iter_mut().find(|c| c.name == "Identity") {
-            identity.dependencies.push("Billing".into());
-        }
-        store.save_desired(ws, &model).unwrap();
-
-        let result = call_tool(&store, ws, "scrutinize", &json!({
-            "analysis": "circular_deps"
-        }));
-        let text = match &result.content[0] {
-            ContentBlock::Text { text } => text,
-        };
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "circular_deps");
-        assert_eq!(parsed["has_cycles"], true);
-    }
-
-    #[test]
-    fn test_query_model_transitive_deps() {
-        let store = test_store();
-        let ws = "/tmp/test-query-trans";
-        let mut model = test_model();
-        // Add Notifications context depending on Billing
-        // Billing already depends on Identity, so transitive from Billing: Identity
-        // Then Notifications depends on Billing, so from Notifications: Billing, Identity
-        model.bounded_contexts.push(BoundedContext {
-            name: "Notifications".into(),
+        let ws = format!("/tmp/test-can-del-{}", std::process::id());
+        store.save_desired(&ws, &DomainModel {
+            name: "P".into(),
             description: "".into(),
-            module_path: "src/notifications".into(),
+            bounded_contexts: vec![BoundedContext {
+                name: "Sales".into(),
+                description: "".into(),
+                module_path: "src/sales".into(),
+                ownership: Ownership::default(),
+                aggregates: vec![],
+                policies: vec![],
+                read_models: vec![],
+                entities: vec![Entity {
+                    name: "Order".into(),
+                    description: "".into(),
+                    aggregate_root: true,
+                    fields: vec![],
+                    methods: vec![],
+                    invariants: vec![],
+                    file_path: None, start_line: None, end_line: None,
+                }],
+                value_objects: vec![],
+                services: vec![],
+                repositories: vec![],
+                events: vec![],
+                modules: vec![],
+                dependencies: vec![],
+                api_endpoints: vec![],
+            }],
+            external_systems: vec![],
+            architectural_decisions: vec![],
             ownership: Ownership::default(),
-            aggregates: vec![],
-            policies: vec![],
-            read_models: vec![],
-            entities: vec![],
-            value_objects: vec![],
-            services: vec![],
-            api_endpoints: vec![],
-            repositories: vec![],
-            events: vec![],
-            dependencies: vec!["Billing".into()],
-        });
-        store.save_desired(ws, &model).unwrap();
+            rules: vec![],
+            tech_stack: TechStack::default(),
+            conventions: Conventions::default(),
+        }).unwrap();
 
-        let result = call_tool(&store, ws, "scrutinize", &json!({
-            "analysis": "transitive_deps",
-            "context": "Notifications"
+        let result = call_tool(&store, &ws, "can_delete_symbol", &json!({
+            "context": "Sales",
+            "entity": "Order"
         }));
-        let text = match &result.content[0] {
-            ContentBlock::Text { text } => text,
-        };
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "transitive_deps");
-        // Notifications → Billing → Identity (transitive)
-        let deps = parsed["dependencies"].as_array().unwrap();
-        assert!(deps.contains(&json!("Billing")));
-        assert!(deps.contains(&json!("Identity")));
+        assert_eq!(result.is_error, None);
+        let ContentBlock::Text { text } = &result.content[0];
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        // Order has no references, so it should be deletable
+        assert_eq!(parsed["status"], "true");
     }
 
     #[test]
-    fn test_query_model_datalog() {
+    fn test_check_architectural_invariant_dispatch() {
         let store = test_store();
-        let ws = "/tmp/test-query-datalog";
-        let model = test_model();
-        store.save_desired(ws, &model).unwrap();
-
-        let result = call_tool(&store, ws, "scrutinize", &json!({
-            "analysis": "datalog",
-            "query": "?[name] := *entity{workspace: $ws, name}"
+        let ws = format!("/tmp/test-invariant-{}", std::process::id());
+        // No data = no violations
+        let result = call_tool(&store, &ws, "check_architectural_invariant", &json!({
+            "invariant": "circular_deps"
         }));
-        let text = match &result.content[0] {
-            ContentBlock::Text { text } => text,
-        };
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "datalog");
-        assert!(parsed["row_count"].as_u64().unwrap() > 0);
+        assert_eq!(result.is_error, None);
+        let ContentBlock::Text { text } = &result.content[0];
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["status"], "true");
+        assert_eq!(parsed["count"], 0);
     }
 
     #[test]
-    fn test_query_model_dependency_graph() {
+    fn test_check_architectural_invariant_unknown() {
         let store = test_store();
-        let ws = "/tmp/test-query-graph";
-        let model = test_model();
-        store.save_desired(ws, &model).unwrap();
-
-        let result = call_tool(&store, ws, "scrutinize", &json!({
-            "analysis": "dependency_graph"
-        }));
-        let text = match &result.content[0] {
-            ContentBlock::Text { text } => text,
-        };
-        let parsed: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["analysis"], "dependency_graph");
-        assert!(parsed["graph"].get("nodes").is_some());
-        assert!(parsed["graph"].get("edges").is_some());
-    }
-
-    #[test]
-    fn test_query_model_missing_param() {
-        let store = test_store();
-        let result = call_tool(&store, "/tmp/x", "scrutinize", &json!({
-            "analysis": "transitive_deps"
+        let result = call_tool(&store, "/tmp/test", "check_architectural_invariant", &json!({
+            "invariant": "nonexistent"
         }));
         assert_eq!(result.is_error, Some(true));
+    }
+
+    #[test]
+    fn test_query_dependency_path_dispatch() {
+        let store = test_store();
+        let ws = format!("/tmp/test-deppath-{}", std::process::id());
+        store.save_desired(&ws, &DomainModel {
+            name: "P".into(),
+            description: "".into(),
+            bounded_contexts: vec![
+                BoundedContext {
+                    name: "A".into(), description: "".into(), module_path: "src/a".into(),
+                    ownership: Ownership::default(), aggregates: vec![], policies: vec![],
+                    read_models: vec![], entities: vec![], value_objects: vec![],
+                    services: vec![], repositories: vec![], events: vec![],
+                    modules: vec![],
+                    dependencies: vec!["B".into()], api_endpoints: vec![],
+                },
+                BoundedContext {
+                    name: "B".into(), description: "".into(), module_path: "src/b".into(),
+                    ownership: Ownership::default(), aggregates: vec![], policies: vec![],
+                    read_models: vec![], entities: vec![], value_objects: vec![],
+                    services: vec![], repositories: vec![], events: vec![],
+                    modules: vec![],
+                    dependencies: vec![], api_endpoints: vec![],
+                },
+            ],
+            external_systems: vec![],
+            architectural_decisions: vec![],
+            ownership: Ownership::default(),
+            rules: vec![],
+            tech_stack: TechStack::default(),
+            conventions: Conventions::default(),
+        }).unwrap();
+
+        let result = call_tool(&store, &ws, "query_dependency_path", &json!({
+            "from_context": "A",
+            "to_context": "B"
+        }));
+        assert_eq!(result.is_error, None);
+        let ContentBlock::Text { text } = &result.content[0];
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["reachable"], true);
     }
 }

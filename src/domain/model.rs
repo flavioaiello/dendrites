@@ -140,9 +140,30 @@ pub struct BoundedContext {
     pub repositories: Vec<Repository>,
     #[serde(default)]
     pub events: Vec<DomainEvent>,
+    #[serde(default)]
+    pub modules: Vec<Module>,
     /// Allowed dependencies to other bounded contexts
     #[serde(default)]
     pub dependencies: Vec<String>,
+}
+
+// ─── Module ────────────────────────────────────────────────────────────────
+
+/// A discovered or declared module within a bounded context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Module {
+    pub name: String,
+    /// Fully-qualified module path (e.g., "domain::model")
+    #[serde(default)]
+    pub path: String,
+    /// Whether the module is declared as `pub mod`
+    #[serde(default)]
+    pub public: bool,
+    /// Source file where the module is declared
+    #[serde(default)]
+    pub file_path: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 // ─── Explicit Aggregates ──────────────────────────────────────────────────
@@ -219,6 +240,13 @@ pub struct Entity {
     pub methods: Vec<Method>,
     #[serde(default)]
     pub invariants: Vec<String>,
+
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 // ─── Value Object ──────────────────────────────────────────────────────────
@@ -232,6 +260,13 @@ pub struct ValueObject {
     pub fields: Vec<Field>,
     #[serde(default)]
     pub validation_rules: Vec<String>,
+
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 // ─── Service ───────────────────────────────────────────────────────────────
@@ -247,6 +282,13 @@ pub struct Service {
     pub methods: Vec<Method>,
     #[serde(default)]
     pub dependencies: Vec<String>,
+
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -267,6 +309,13 @@ pub struct Repository {
     pub aggregate: String,
     #[serde(default)]
     pub methods: Vec<Method>,
+
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 // ─── Domain Event ──────────────────────────────────────────────────────────
@@ -281,6 +330,12 @@ pub struct DomainEvent {
     /// Which entity/aggregate emits this event
     #[serde(default)]
     pub source: String,
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 // ─── External Boundaries ──────────────────────────────────────────────────
@@ -381,6 +436,13 @@ pub struct Method {
     pub parameters: Vec<Field>,
     #[serde(default)]
     pub return_type: String,
+
+    #[serde(default)]
+    pub file_path: Option<String>,
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub end_line: Option<usize>,
 }
 
 // ─── Architectural Rules ───────────────────────────────────────────────────

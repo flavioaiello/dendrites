@@ -253,6 +253,7 @@ mod tests {
                 api_endpoints: vec![],
                 repositories: vec![],
                 events: vec![],
+                modules: vec![],
                 dependencies: vec![],
             }],
             external_systems: vec![],

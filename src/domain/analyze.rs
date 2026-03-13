@@ -1,8 +1,13 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::model::*;
+use super::scanner::AstScanner;
+use super::rust_syn::RustSynScanner;
+use super::polyglot::TreeSitterScanner;
 
 // ─── Live Import Extraction ────────────────────────────────────────────────
 
@@ -62,6 +67,15 @@ pub fn extract_live_dependencies(file_path: &Path, source_code: &str) -> Result<
     Ok(deps)
 }
 
+/// Return a scanner appropriate for the file's extension, or None if unsupported.
+fn scanner_for_path(path: &Path) -> Option<Box<dyn AstScanner>> {
+    match path.extension()?.to_str()? {
+        "rs" => Some(Box::new(RustSynScanner)),
+        "py" | "ts" | "tsx" => Some(Box::new(TreeSitterScanner::new())),
+        _ => None,
+    }
+}
+
 pub fn scan_workspace(workspace_root: &Path) -> Result<Vec<LiveDependency>> {
     let mut all_deps = Vec::new();
 
@@ -70,9 +84,10 @@ pub fn scan_workspace(workspace_root: &Path) -> Result<Vec<LiveDependency>> {
         .filter_map(Result::ok)
     {
         let path = entry.path();
-        if path.is_file() && path.extension().is_some_and(|ext| ext == "rs")
+        if path.is_file()
+            && let Some(scanner) = scanner_for_path(path)
             && let Ok(content) = std::fs::read_to_string(path)
-            && let Ok(deps) = extract_live_dependencies(path, &content)
+            && let Ok(deps) = scanner.extract_live_dependencies(path, &content)
         {
             all_deps.extend(deps);
         }
@@ -87,6 +102,8 @@ pub fn scan_workspace(workspace_root: &Path) -> Result<Vec<LiveDependency>> {
 #[derive(Debug, Clone)]
 pub struct DiscoveredStruct {
     pub name: String,
+    pub start_line: usize,
+    pub end_line: usize,
     pub fields: Vec<Field>,
     pub file_path: String,
 }
@@ -94,11 +111,32 @@ pub struct DiscoveredStruct {
 /// A method discovered from an impl block.
 #[derive(Debug, Clone)]
 pub struct DiscoveredMethod {
+    pub start_line: usize,
+    pub end_line: usize,
     /// The type this impl block is for (e.g. "Store")
     pub owner: String,
     pub name: String,
     pub parameters: Vec<Field>,
     pub return_type: String,
+    pub file_path: String,
+}
+
+/// An enum discovered in the source code with its variants.
+#[derive(Debug, Clone)]
+pub struct DiscoveredEnum {
+    pub name: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    /// Variants represented as Fields: name = variant ident, field_type = associated data.
+    pub variants: Vec<Field>,
+    pub file_path: String,
+}
+
+/// A module declaration discovered in the AST.
+#[derive(Debug, Clone)]
+pub struct DiscoveredModule {
+    pub name: String,
+    pub public: bool,
     pub file_path: String,
 }
 
@@ -108,16 +146,24 @@ pub struct ContextScan {
     pub context_name: String,
     pub module_path: String,
     pub structs: Vec<DiscoveredStruct>,
+    pub enums: Vec<DiscoveredEnum>,
     pub methods: Vec<DiscoveredMethod>,
+    pub modules: Vec<DiscoveredModule>,
 }
 
-/// AST visitor that collects struct definitions and impl methods.
+// ─── Inline Rust scanner (used by test suite only) ─────────────────────────
+
+#[cfg(test)]
+/// AST visitor that collects struct definitions, enums, modules, and impl methods.
 struct StructMethodVisitor {
     structs: Vec<DiscoveredStruct>,
+    enums: Vec<DiscoveredEnum>,
     methods: Vec<DiscoveredMethod>,
+    modules: Vec<DiscoveredModule>,
     file_path: String,
 }
 
+#[cfg(test)]
 impl<'ast> Visit<'ast> for StructMethodVisitor {
     fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
         // Skip private, test, or #[cfg(test)] structs
@@ -146,11 +192,76 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
 
         self.structs.push(DiscoveredStruct {
             name,
+            start_line: node.span().start().line,
+            end_line: node.span().end().line,
             fields,
             file_path: self.file_path.clone(),
         });
 
         syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        if !is_public(&node.vis) || has_cfg_test(&node.attrs) {
+            return;
+        }
+
+        let name = node.ident.to_string();
+        let variants = node
+            .variants
+            .iter()
+            .map(|v| {
+                let variant_name = v.ident.to_string();
+                let variant_type = match &v.fields {
+                    syn::Fields::Unit => "()".to_string(),
+                    syn::Fields::Unnamed(u) => {
+                        let types: Vec<String> =
+                            u.unnamed.iter().map(|f| type_to_string(&f.ty)).collect();
+                        types.join(", ")
+                    }
+                    syn::Fields::Named(n) => {
+                        let parts: Vec<String> = n
+                            .named
+                            .iter()
+                            .filter_map(|f| {
+                                let fname = f.ident.as_ref()?.to_string();
+                                Some(format!("{}: {}", fname, type_to_string(&f.ty)))
+                            })
+                            .collect();
+                        format!("{{ {} }}", parts.join(", "))
+                    }
+                };
+                Field {
+                    name: variant_name,
+                    field_type: variant_type,
+                    required: true,
+                    description: String::new(),
+                }
+            })
+            .collect();
+
+        self.enums.push(DiscoveredEnum {
+            name,
+            start_line: node.span().start().line,
+            end_line: node.span().end().line,
+            variants,
+            file_path: self.file_path.clone(),
+        });
+
+        syn::visit::visit_item_enum(self, node);
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        let name = node.ident.to_string();
+        if name == "tests" || has_cfg_test(&node.attrs) {
+            return;
+        }
+        self.modules.push(DiscoveredModule {
+            name,
+            public: is_public(&node.vis),
+            file_path: self.file_path.clone(),
+        });
+        syn::visit::visit_item_mod(self, node);
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
@@ -198,6 +309,8 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
                 self.methods.push(DiscoveredMethod {
                     owner: owner.clone(),
                     name,
+                    start_line: method.span().start().line,
+                    end_line: method.span().end().line,
                     parameters,
                     return_type,
                     file_path: self.file_path.clone(),
@@ -209,28 +322,33 @@ impl<'ast> Visit<'ast> for StructMethodVisitor {
     }
 }
 
-/// Scan a single Rust source file and extract structs + impl methods.
-fn scan_file(file_path: &Path, source_code: &str) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)> {
+/// Scan a single Rust source file and extract structs, enums, methods, and modules.
+#[cfg(test)]
+fn scan_file(file_path: &Path, source_code: &str) -> Result<ScanResult> {
     let syntax_tree = syn::parse_file(source_code)
         .with_context(|| format!("Failed to parse: {}", file_path.display()))?;
 
     let mut visitor = StructMethodVisitor {
         structs: vec![],
+        enums: vec![],
         methods: vec![],
+        modules: vec![],
         file_path: file_path.to_string_lossy().to_string(),
     };
     visitor.visit_file(&syntax_tree);
 
-    Ok((visitor.structs, visitor.methods))
+    Ok((visitor.structs, visitor.enums, visitor.methods, visitor.modules))
 }
 
-/// Scan all `.rs` files under a directory and collect structs + methods.
-fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)> {
+/// Scan all supported source files under a directory and collect structs, enums, methods, and modules.
+fn scan_directory(dir: &Path) -> Result<ScanResult> {
     let mut all_structs = Vec::new();
+    let mut all_enums = Vec::new();
     let mut all_methods = Vec::new();
+    let mut all_modules = Vec::new();
 
     if !dir.exists() {
-        return Ok((all_structs, all_methods));
+        return Ok((all_structs, all_enums, all_methods, all_modules));
     }
 
     for entry in ignore::WalkBuilder::new(dir)
@@ -239,16 +357,18 @@ fn scan_directory(dir: &Path) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMe
     {
         let path = entry.path();
         if path.is_file()
-            && path.extension().is_some_and(|ext| ext == "rs")
+            && let Some(scanner) = scanner_for_path(path)
             && let Ok(content) = std::fs::read_to_string(path)
-            && let Ok((structs, methods)) = scan_file(path, &content)
+            && let Ok((structs, enums, methods, modules)) = scanner.scan_file(path, &content)
         {
             all_structs.extend(structs);
+            all_enums.extend(enums);
             all_methods.extend(methods);
+            all_modules.extend(modules);
         }
     }
 
-    Ok((all_structs, all_methods))
+    Ok((all_structs, all_enums, all_methods, all_modules))
 }
 
 // ─── Crate Discovery ──────────────────────────────────────────────────────
@@ -328,7 +448,10 @@ fn discover_crate_sources(workspace_root: &Path) -> Vec<CrateSource> {
     sources
 }
 
-// ─── Struct Classification ─────────────────────────────────────────────────
+// ─── Struct & Enum Classification ──────────────────────────────────────────
+
+/// Result type for scanning a source file: (structs, enums, methods, modules).
+pub type ScanResult = (Vec<DiscoveredStruct>, Vec<DiscoveredEnum>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>);
 
 /// Classification of a discovered struct based on naming conventions and
 /// structural heuristics. Used when no desired model is available or when a
@@ -394,6 +517,27 @@ fn classify_struct(
     }
 
     // Has fields, no public methods → pure data → ValueObject
+    StructKind::ValueObject
+}
+
+/// Classify an enum via naming conventions first, then variant shape.
+///
+/// Enums are most commonly ValueObjects (status codes, type discriminators).
+/// Event naming suffixes override to Event.
+fn classify_enum(name: &str) -> StructKind {
+    let upper = name.to_uppercase();
+
+    if upper.ends_with("EVENT")
+        || upper.ends_with("CREATED")
+        || upper.ends_with("UPDATED")
+        || upper.ends_with("DELETED")
+        || upper.ends_with("CHANGED")
+        || upper.ends_with("OCCURRED")
+    {
+        return StructKind::Event;
+    }
+
+    // Enums are natural value objects — closed set of named values
     StructKind::ValueObject
 }
 
@@ -493,7 +637,7 @@ pub fn scan_actual_model(
 
         // 3. For each discovered context, scan and classify
         for (ctx_name, scan_dir, module_path) in &module_dirs {
-            let (structs, methods) = scan_directory(scan_dir)?;
+            let (structs, enums, methods, discovered_modules) = scan_directory(scan_dir)?;
 
             // Resolve matching desired bounded context (by name or module_path)
             let desired_bc = desired.and_then(|d| {
@@ -518,6 +662,22 @@ pub fn scan_actual_model(
                 services: vec![],
                 repositories: vec![],
                 events: vec![],
+                modules: discovered_modules
+                    .iter()
+                    .map(|dm| {
+                        let mod_path = format!("{}::{}", ctx_name, dm.name);
+                        let desired_mod = desired_bc.and_then(|dbc| {
+                            dbc.modules.iter().find(|m| m.name.eq_ignore_ascii_case(&dm.name))
+                        });
+                        Module {
+                            name: dm.name.clone(),
+                            path: mod_path,
+                            public: dm.public,
+                            file_path: dm.file_path.clone(),
+                            description: desired_mod.map_or(String::new(), |m| m.description.clone()),
+                        }
+                    })
+                    .collect(),
                 dependencies: desired_bc.map_or(vec![], |b| b.dependencies.clone()),
                 api_endpoints: desired_bc.map_or(vec![], |b| b.api_endpoints.clone()),
             };
@@ -534,6 +694,9 @@ pub fn scan_actual_model(
                         description: String::new(),
                         parameters: m.parameters.clone(),
                         return_type: m.return_type.clone(),
+                        file_path: Some(m.file_path.clone()),
+                        start_line: Some(m.start_line),
+                        end_line: Some(m.end_line),
                     })
                     .collect();
 
@@ -569,6 +732,9 @@ pub fn scan_actual_model(
                             fields: discovered.fields.clone(),
                             methods: struct_methods,
                             invariants: desired_ent.map_or(vec![], |e| e.invariants.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
                         });
                     }
                     StructKind::ValueObject => {
@@ -579,6 +745,9 @@ pub fn scan_actual_model(
                             description: desired_vo.map_or(String::new(), |v| v.description.clone()),
                             fields: discovered.fields.clone(),
                             validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
                         });
                     }
                     StructKind::Service => {
@@ -590,6 +759,9 @@ pub fn scan_actual_model(
                             kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
                             methods: struct_methods,
                             dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
                         });
                     }
                     StructKind::Repository => {
@@ -599,6 +771,9 @@ pub fn scan_actual_model(
                             name: name.clone(),
                             aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
                             methods: struct_methods,
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
                         });
                     }
                     StructKind::Event => {
@@ -609,6 +784,116 @@ pub fn scan_actual_model(
                             description: desired_evt.map_or(String::new(), |e| e.description.clone()),
                             fields: discovered.fields.clone(),
                             source: desired_evt.map_or(String::new(), |e| e.source.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
+                        });
+                    }
+                }
+            }
+
+            // ── Classify discovered enums ──
+            for discovered in &enums {
+                let name = &discovered.name;
+
+                // Collect public methods for this enum (from impl blocks)
+                let enum_methods: Vec<Method> = methods
+                    .iter()
+                    .filter(|m| m.owner == *name)
+                    .map(|m| Method {
+                        name: m.name.clone(),
+                        description: String::new(),
+                        parameters: m.parameters.clone(),
+                        return_type: m.return_type.clone(),
+                        file_path: Some(m.file_path.clone()),
+                        start_line: Some(m.start_line),
+                        end_line: Some(m.end_line),
+                    })
+                    .collect();
+
+                // Check desired model for explicit classification
+                let desired_kind = desired_bc.and_then(|dbc| {
+                    if dbc.entities.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Entity)
+                    } else if dbc.value_objects.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::ValueObject)
+                    } else if dbc.services.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Service)
+                    } else if dbc.events.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                        Some(StructKind::Event)
+                    } else {
+                        None
+                    }
+                });
+
+                let kind = desired_kind.unwrap_or_else(|| classify_enum(name));
+
+                match kind {
+                    StructKind::Entity => {
+                        let desired_ent = desired_bc
+                            .and_then(|dbc| dbc.entities.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        bc.entities.push(Entity {
+                            name: name.clone(),
+                            description: desired_ent.map_or(String::new(), |e| e.description.clone()),
+                            aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
+                            fields: discovered.variants.clone(),
+                            methods: enum_methods,
+                            invariants: desired_ent.map_or(vec![], |e| e.invariants.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
+                        });
+                    }
+                    StructKind::ValueObject => {
+                        let desired_vo = desired_bc
+                            .and_then(|dbc| dbc.value_objects.iter().find(|v| v.name.eq_ignore_ascii_case(name)));
+                        bc.value_objects.push(ValueObject {
+                            name: name.clone(),
+                            description: desired_vo.map_or(String::new(), |v| v.description.clone()),
+                            fields: discovered.variants.clone(),
+                            validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
+                        });
+                    }
+                    StructKind::Service => {
+                        let desired_svc = desired_bc
+                            .and_then(|dbc| dbc.services.iter().find(|s| s.name.eq_ignore_ascii_case(name)));
+                        bc.services.push(Service {
+                            name: name.clone(),
+                            description: desired_svc.map_or(String::new(), |s| s.description.clone()),
+                            kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
+                            methods: enum_methods,
+                            dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
+                        });
+                    }
+                    StructKind::Repository => {
+                        let desired_repo = desired_bc
+                            .and_then(|dbc| dbc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name)));
+                        bc.repositories.push(Repository {
+                            name: name.clone(),
+                            aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
+                            methods: enum_methods,
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
+                        });
+                    }
+                    StructKind::Event => {
+                        let desired_evt = desired_bc
+                            .and_then(|dbc| dbc.events.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        bc.events.push(DomainEvent {
+                            name: name.clone(),
+                            description: desired_evt.map_or(String::new(), |e| e.description.clone()),
+                            fields: discovered.variants.clone(),
+                            source: desired_evt.map_or(String::new(), |e| e.source.clone()),
+                            file_path: Some(discovered.file_path.clone()),
+                            start_line: Some(discovered.start_line),
+                            end_line: Some(discovered.end_line),
                         });
                     }
                 }
@@ -621,13 +906,27 @@ pub fn scan_actual_model(
     Ok(actual)
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+// ─── Helpers (test-only: used by inline StructMethodVisitor) ───────────────
 
+#[cfg(test)]
 fn is_public(vis: &syn::Visibility) -> bool {
     matches!(vis, syn::Visibility::Public(_))
 }
 
+#[cfg(test)]
+fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("cfg") {
+            return false;
+        }
+        attr.parse_args::<syn::Ident>()
+            .map(|ident| ident == "test")
+            .unwrap_or(false)
+    })
+}
+
 /// Convert a syn::Type to a readable string.
+#[cfg(test)]
 fn type_to_string(ty: &syn::Type) -> String {
     // Manual conversion without depending on `quote` crate
     match ty {
@@ -680,6 +979,7 @@ fn type_to_string(ty: &syn::Type) -> String {
 }
 
 /// Check whether a type is Option<T>.
+#[cfg(test)]
 fn is_option_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(path) = ty
         && let Some(segment) = path.path.segments.last()
@@ -716,7 +1016,7 @@ mod tests {
                 pub age: u32,
             }
         "#;
-        let (structs, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "User");
         assert_eq!(structs[0].fields.len(), 3);
@@ -735,7 +1035,7 @@ mod tests {
                 fn private_helper(&self) {} // should be ignored
             }
         "#;
-        let (structs, methods) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(methods.len(), 2); // only public methods
         assert_eq!(methods[0].owner, "Store");
@@ -751,7 +1051,7 @@ mod tests {
             struct PrivateStruct { x: i32 }
             pub struct PublicStruct { pub y: i32 }
         "#;
-        let (structs, _) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (structs, _, _, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(structs.len(), 1);
         assert_eq!(structs[0].name, "PublicStruct");
     }
@@ -769,7 +1069,7 @@ mod tests {
                 }
             }
         "#;
-        let (_, methods) = scan_file(Path::new("test.rs"), code).unwrap();
+        let (_, _, methods, _) = scan_file(Path::new("test.rs"), code).unwrap();
         assert_eq!(methods.len(), 1); // only inherent impl
         assert_eq!(methods[0].name, "bar");
     }
@@ -827,6 +1127,8 @@ mod tests {
             parameters: vec![],
             return_type: String::new(),
             file_path: String::new(),
+            start_line: 0,
+            end_line: 0,
         }];
 
         // Data fields + methods → Entity
@@ -950,17 +1252,24 @@ impl User {
                     fields: vec![],
                     methods: vec![],
                     invariants: vec!["Email must be unique".into()],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
                 value_objects: vec![ValueObject {
                     name: "Email".into(),
                     description: "".into(),
                     fields: vec![],
                     validation_rules: vec![],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
                 services: vec![],
                 api_endpoints: vec![],
                 repositories: vec![],
                 events: vec![],
+                modules: vec![],
                 dependencies: vec![],
             }],
             external_systems: vec![],

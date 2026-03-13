@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
-use super::analyze::{DiscoveredMethod, DiscoveredStruct, LiveDependency};
+use super::analyze::{DiscoveredMethod, DiscoveredStruct, LiveDependency, ScanResult};
 use super::model::Field;
 use super::scanner::AstScanner;
 
@@ -11,10 +11,17 @@ use super::scanner::AstScanner;
 enum LangFamily {
     TypeScript,
     Python,
+    Go,
 }
 
 /// A polyglot scanner using Tree-Sitter to parse non-Rust files.
 pub struct TreeSitterScanner;
+
+impl Default for TreeSitterScanner {
+    fn default() -> Self {
+        Self
+    }
+}
 
 impl TreeSitterScanner {
     pub fn new() -> Self {
@@ -35,6 +42,10 @@ impl TreeSitterScanner {
             "py" => Some((
                 tree_sitter_python::LANGUAGE.into(),
                 LangFamily::Python,
+            )),
+            "go" => Some((
+                tree_sitter_go::LANGUAGE.into(),
+                LangFamily::Go,
             )),
             _ => None,
         }
@@ -122,7 +133,7 @@ fn python_extract_classes(
     let query_src = r#"
         (class_definition
           name: (identifier) @class_name
-          body: (block) @class_body)
+          body: (block) @class_body) @class_node
     "#;
 
     let language = tree.language();
@@ -141,17 +152,21 @@ fn python_extract_classes(
 
     let class_name_idx = query.capture_index_for_name("class_name").unwrap();
     let class_body_idx = query.capture_index_for_name("class_body").unwrap();
+    let class_node_idx = query.capture_index_for_name("class_node").unwrap();
 
     let mut matches = cursor.matches(&query, root, source.as_bytes());
     while let Some(m) = matches.next() {
         let mut name = "";
         let mut body_node = None;
+        let mut class_node = None;
 
         for cap in m.captures {
             if cap.index == class_name_idx {
                 name = node_text(cap.node, source);
             } else if cap.index == class_body_idx {
                 body_node = Some(cap.node);
+            } else if cap.index == class_node_idx {
+                class_node = Some(cap.node);
             }
         }
 
@@ -164,8 +179,15 @@ fn python_extract_classes(
             .map(|body| python_extract_init_fields(source, body))
             .unwrap_or_default();
 
+        let class_nd = match class_node {
+            Some(n) => n,
+            None => continue,
+        };
+
         structs.push(DiscoveredStruct {
             name: name.to_string(),
+            start_line: class_nd.start_position().row + 1,
+            end_line: class_nd.end_position().row + 1,
             fields,
             file_path: file_path.to_string(),
         });
@@ -188,43 +210,43 @@ fn python_extract_init_fields(source: &str, class_body: Node) -> Vec<Field> {
     // then find `self.x` attribute assignments
     for child in children(class_body) {
         // Typed class-level field: `name: str = "default"` or `name: int`
-        if child.kind() == "expression_statement" {
-            if let Some(assign) = child.child(0) {
-                if assign.kind() == "assignment" {
-                    if let (Some(left), Some(right)) = (
-                        assign.child_by_field_name("left"),
-                        assign.child_by_field_name("type"),
-                    ) {
-                        if left.kind() == "identifier" {
-                            let field_name = node_text(left, source).to_string();
-                            let field_type = node_text(right, source).to_string();
-                            // Skip private/dunder unless it's a known pattern
-                            if !field_name.starts_with('_') {
-                                fields.push(Field {
-                                    name: field_name,
-                                    field_type,
-                                    required: true,
-                                    description: String::new(),
-                                });
-                            }
-                        }
+        if child.kind() == "expression_statement"
+            && let Some(assign) = child.child(0)
+        {
+            if assign.kind() == "assignment" {
+                if let (Some(left), Some(right)) = (
+                    assign.child_by_field_name("left"),
+                    assign.child_by_field_name("type"),
+                )
+                    && left.kind() == "identifier"
+                {
+                    let field_name = node_text(left, source).to_string();
+                    let field_type = node_text(right, source).to_string();
+                    // Skip private/dunder unless it's a known pattern
+                    if !field_name.starts_with('_') {
+                        fields.push(Field {
+                            name: field_name,
+                            field_type,
+                            required: true,
+                            description: String::new(),
+                        });
                     }
-                } else if assign.kind() == "type" {
-                    // bare type annotation: `name: str`
-                    if let (Some(ident), Some(ty)) = (
-                        assign.child_by_field_name("identifier"),
-                        assign.child_by_field_name("type"),
-                    ) {
-                        let field_name = node_text(ident, source).to_string();
-                        let field_type = node_text(ty, source).to_string();
-                        if !field_name.starts_with('_') {
-                            fields.push(Field {
-                                name: field_name,
-                                field_type,
-                                required: true,
-                                description: String::new(),
-                            });
-                        }
+                }
+            } else if assign.kind() == "type" {
+                // bare type annotation: `name: str`
+                if let (Some(ident), Some(ty)) = (
+                    assign.child_by_field_name("identifier"),
+                    assign.child_by_field_name("type"),
+                ) {
+                    let field_name = node_text(ident, source).to_string();
+                    let field_type = node_text(ty, source).to_string();
+                    if !field_name.starts_with('_') {
+                        fields.push(Field {
+                            name: field_name,
+                            field_type,
+                            required: true,
+                            description: String::new(),
+                        });
                     }
                 }
             }
@@ -233,10 +255,10 @@ fn python_extract_init_fields(source: &str, class_body: Node) -> Vec<Field> {
         // Also scan __init__ for `self.x: type = ...` or `self.x = ...`
         if child.kind() == "function_definition" {
             let name_node = child.child_by_field_name("name");
-            if name_node.map(|n| node_text(n, source)) == Some("__init__") {
-                if let Some(body) = child.child_by_field_name("body") {
-                    fields.extend(python_extract_self_assignments(source, body));
-                }
+            if name_node.map(|n| node_text(n, source)) == Some("__init__")
+                && let Some(body) = child.child_by_field_name("body")
+            {
+                fields.extend(python_extract_self_assignments(source, body));
             }
         }
     }
@@ -334,11 +356,11 @@ fn python_extract_methods(
         methods.push(DiscoveredMethod {
             owner: owner.to_string(),
             name: method_name.to_string(),
+            start_line: child.start_position().row + 1,
+            end_line: child.end_position().row + 1,
             parameters: params,
             return_type,
             file_path: file_path.to_string(),
-            pre_conditions: vec![],
-            post_conditions: vec![],
         });
     }
 
@@ -451,7 +473,7 @@ fn ts_extract_classes(
     let class_query_src = r#"
         (class_declaration
           name: (type_identifier) @class_name
-          body: (class_body) @class_body)
+          body: (class_body) @class_body) @class_node
     "#;
 
     let language = tree.language();
@@ -465,6 +487,7 @@ fn ts_extract_classes(
 
     let class_name_idx = query.capture_index_for_name("class_name").unwrap();
     let class_body_idx = query.capture_index_for_name("class_body").unwrap();
+    let class_node_idx = query.capture_index_for_name("class_node").unwrap();
 
     let mut cursor = QueryCursor::new();
     let root = tree.root_node();
@@ -473,12 +496,15 @@ fn ts_extract_classes(
     while let Some(m) = matches.next() {
         let mut name = "";
         let mut body_node = None;
+        let mut class_node = None;
 
         for cap in m.captures {
             if cap.index == class_name_idx {
                 name = node_text(cap.node, source);
             } else if cap.index == class_body_idx {
                 body_node = Some(cap.node);
+            } else if cap.index == class_node_idx {
+                class_node = Some(cap.node);
             }
         }
 
@@ -491,9 +517,16 @@ fn ts_extract_classes(
             None => continue,
         };
 
+        let class_nd = match class_node {
+            Some(n) => n,
+            None => continue,
+        };
+
         let fields = ts_extract_class_fields(source, body);
         structs.push(DiscoveredStruct {
             name: name.to_string(),
+            start_line: class_nd.start_position().row + 1,
+            end_line: class_nd.end_position().row + 1,
             fields,
             file_path: file_path.to_string(),
         });
@@ -535,11 +568,16 @@ fn ts_extract_classes(
                 .map(|b| ts_extract_interface_fields(source, b))
                 .unwrap_or_default();
 
-            structs.push(DiscoveredStruct {
-                name: name.to_string(),
-                fields,
-                file_path: file_path.to_string(),
-            });
+            // Use body_node position as interface captures don't have a dedicated node capture
+            if let Some(body) = body_node {
+                structs.push(DiscoveredStruct {
+                    name: name.to_string(),
+                    start_line: body.start_position().row + 1,
+                    end_line: body.end_position().row + 1,
+                    fields,
+                    file_path: file_path.to_string(),
+                });
+            }
         }
     }
 
@@ -684,11 +722,11 @@ fn ts_extract_class_methods(
         methods.push(DiscoveredMethod {
             owner: owner.to_string(),
             name: method_name.to_string(),
+            start_line: child.start_position().row + 1,
+            end_line: child.end_position().row + 1,
             parameters: params,
             return_type,
             file_path: file_path.to_string(),
-            pre_conditions: vec![],
-            post_conditions: vec![],
         });
     }
 
@@ -730,6 +768,316 @@ fn ts_parse_params(source: &str, params_node: Node) -> Vec<Field> {
     fields
 }
 
+// ─── Go extraction ─────────────────────────────────────────────────────────
+
+fn go_extract_imports(source: &str, tree: &tree_sitter::Tree) -> Vec<String> {
+    let query_src = r#"
+        (import_spec
+          path: (interpreted_string_literal) @module)
+    "#;
+
+    let language = tree.language();
+    let query = match Query::new(&language, query_src) {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::warn!("Failed to compile Go import query: {e}");
+            return vec![];
+        }
+    };
+
+    let mut cursor = QueryCursor::new();
+    let root = tree.root_node();
+    let mut imports = Vec::new();
+
+    let mut matches = cursor.matches(&query, root, source.as_bytes());
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let raw = node_text(cap.node, source);
+            let cleaned = raw.trim_matches('"');
+            imports.push(cleaned.to_string());
+        }
+    }
+
+    imports
+}
+
+fn go_extract_structs_and_methods(
+    source: &str,
+    tree: &tree_sitter::Tree,
+    file_path: &str,
+) -> (Vec<DiscoveredStruct>, Vec<DiscoveredMethod>) {
+    let mut structs = Vec::new();
+    let mut methods = Vec::new();
+
+    // Extract struct type declarations: `type Foo struct { ... }`
+    let struct_query_src = r#"
+        (type_declaration
+          (type_spec
+            name: (type_identifier) @struct_name
+            type: (struct_type
+              (field_declaration_list) @field_list)) @type_spec)
+    "#;
+
+    let language = tree.language();
+
+    if let Ok(query) = Query::new(&language, struct_query_src) {
+        let name_idx = query.capture_index_for_name("struct_name").unwrap();
+        let field_list_idx = query.capture_index_for_name("field_list").unwrap();
+        let type_spec_idx = query.capture_index_for_name("type_spec").unwrap();
+        let mut cursor = QueryCursor::new();
+        let root = tree.root_node();
+
+        let mut matches = cursor.matches(&query, root, source.as_bytes());
+        while let Some(m) = matches.next() {
+            let mut name = "";
+            let mut field_list_node = None;
+            let mut spec_node = None;
+
+            for cap in m.captures {
+                if cap.index == name_idx {
+                    name = node_text(cap.node, source);
+                } else if cap.index == field_list_idx {
+                    field_list_node = Some(cap.node);
+                } else if cap.index == type_spec_idx {
+                    spec_node = Some(cap.node);
+                }
+            }
+
+            if name.is_empty() || !name.starts_with(|c: char| c.is_uppercase()) {
+                continue;
+            }
+
+            let fields = field_list_node
+                .map(|fl| go_extract_struct_fields(source, fl))
+                .unwrap_or_default();
+
+            let nd = spec_node.unwrap();
+            structs.push(DiscoveredStruct {
+                name: name.to_string(),
+                start_line: nd.start_position().row + 1,
+                end_line: nd.end_position().row + 1,
+                fields,
+                file_path: file_path.to_string(),
+            });
+        }
+    }
+
+    // Extract interface type declarations: `type Reader interface { ... }`
+    let iface_query_src = r#"
+        (type_declaration
+          (type_spec
+            name: (type_identifier) @iface_name
+            type: (interface_type) @iface_body) @iface_spec)
+    "#;
+
+    if let Ok(query) = Query::new(&language, iface_query_src) {
+        let name_idx = query.capture_index_for_name("iface_name").unwrap();
+        let body_idx = query.capture_index_for_name("iface_body").unwrap();
+        let spec_idx = query.capture_index_for_name("iface_spec").unwrap();
+        let mut cursor = QueryCursor::new();
+        let root = tree.root_node();
+
+        let mut matches = cursor.matches(&query, root, source.as_bytes());
+        while let Some(m) = matches.next() {
+            let mut name = "";
+            let mut body_node = None;
+            let mut spec_node = None;
+
+            for cap in m.captures {
+                if cap.index == name_idx {
+                    name = node_text(cap.node, source);
+                } else if cap.index == body_idx {
+                    body_node = Some(cap.node);
+                } else if cap.index == spec_idx {
+                    spec_node = Some(cap.node);
+                }
+            }
+
+            if name.is_empty() || !name.starts_with(|c: char| c.is_uppercase()) {
+                continue;
+            }
+
+            let fields = body_node
+                .map(|b| go_extract_interface_methods(source, b))
+                .unwrap_or_default();
+
+            let nd = spec_node.unwrap();
+            structs.push(DiscoveredStruct {
+                name: name.to_string(),
+                start_line: nd.start_position().row + 1,
+                end_line: nd.end_position().row + 1,
+                fields,
+                file_path: file_path.to_string(),
+            });
+        }
+    }
+
+    // Extract method declarations: `func (r *Repo) Method(...) ReturnType { ... }`
+    let method_query_src = r#"
+        (method_declaration
+          receiver: (parameter_list) @receiver
+          name: (field_identifier) @method_name
+          parameters: (parameter_list) @params) @method_node
+    "#;
+
+    if let Ok(query) = Query::new(&language, method_query_src) {
+        let receiver_idx = query.capture_index_for_name("receiver").unwrap();
+        let name_idx = query.capture_index_for_name("method_name").unwrap();
+        let params_idx = query.capture_index_for_name("params").unwrap();
+        let method_node_idx = query.capture_index_for_name("method_node").unwrap();
+        let mut cursor = QueryCursor::new();
+        let root = tree.root_node();
+
+        let mut matches = cursor.matches(&query, root, source.as_bytes());
+        while let Some(m) = matches.next() {
+            let mut owner = String::new();
+            let mut method_name = "";
+            let mut params_node = None;
+            let mut method_node = None;
+
+            for cap in m.captures {
+                if cap.index == receiver_idx {
+                    owner = go_extract_receiver_type(source, cap.node);
+                } else if cap.index == name_idx {
+                    method_name = node_text(cap.node, source);
+                } else if cap.index == params_idx {
+                    params_node = Some(cap.node);
+                } else if cap.index == method_node_idx {
+                    method_node = Some(cap.node);
+                }
+            }
+
+            // Only exported methods (capitalized)
+            if method_name.is_empty() || !method_name.starts_with(|c: char| c.is_uppercase()) {
+                continue;
+            }
+
+            let parameters = params_node
+                .map(|p| go_parse_params(source, p))
+                .unwrap_or_default();
+
+            let return_type = method_node
+                .and_then(|n| n.child_by_field_name("result"))
+                .map(|rt| node_text(rt, source).to_string())
+                .unwrap_or_default();
+
+            let nd = method_node.unwrap();
+            methods.push(DiscoveredMethod {
+                owner,
+                name: method_name.to_string(),
+                start_line: nd.start_position().row + 1,
+                end_line: nd.end_position().row + 1,
+                parameters,
+                return_type,
+                file_path: file_path.to_string(),
+            });
+        }
+    }
+
+    (structs, methods)
+}
+
+fn go_extract_struct_fields(source: &str, field_list: Node) -> Vec<Field> {
+    let mut fields = Vec::new();
+
+    for child in children(field_list) {
+        if child.kind() != "field_declaration" {
+            continue;
+        }
+
+        let field_type = child
+            .child_by_field_name("type")
+            .map(|t| node_text(t, source).to_string())
+            .unwrap_or_default();
+
+        // A field_declaration may have multiple names: `X, Y int`
+        let name_node = child.child_by_field_name("name");
+        if let Some(n) = name_node {
+            let field_name = node_text(n, source);
+            // Only exported fields (capitalized)
+            if field_name.starts_with(|c: char| c.is_uppercase()) {
+                fields.push(Field {
+                    name: field_name.to_string(),
+                    field_type: field_type.clone(),
+                    required: true,
+                    description: String::new(),
+                });
+            }
+        }
+    }
+
+    fields
+}
+
+fn go_extract_interface_methods(source: &str, iface_body: Node) -> Vec<Field> {
+    let mut fields = Vec::new();
+
+    for child in children(iface_body) {
+        if child.kind() == "method_elem" || child.kind() == "method_spec" {
+            let name = child
+                .child_by_field_name("name")
+                .map(|n| node_text(n, source).to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let params = child
+                    .child_by_field_name("parameters")
+                    .map(|p| node_text(p, source).to_string())
+                    .unwrap_or_default();
+                fields.push(Field {
+                    name,
+                    field_type: params,
+                    required: true,
+                    description: String::new(),
+                });
+            }
+        }
+    }
+
+    fields
+}
+
+fn go_extract_receiver_type(source: &str, receiver_list: Node) -> String {
+    // receiver is `(r *Type)` or `(r Type)` — extract the type name
+    for child in children(receiver_list) {
+        if child.kind() == "parameter_declaration"
+            && let Some(ty) = child.child_by_field_name("type")
+        {
+            let type_text = node_text(ty, source);
+            // Strip pointer prefix
+            return type_text.trim_start_matches('*').to_string();
+        }
+    }
+    String::new()
+}
+
+fn go_parse_params(source: &str, params_node: Node) -> Vec<Field> {
+    let mut fields = Vec::new();
+
+    for child in children(params_node) {
+        if child.kind() != "parameter_declaration" {
+            continue;
+        }
+
+        let field_type = child
+            .child_by_field_name("type")
+            .map(|t| node_text(t, source).to_string())
+            .unwrap_or_default();
+
+        let name_node = child.child_by_field_name("name");
+        if let Some(n) = name_node {
+            let name = node_text(n, source);
+            fields.push(Field {
+                name: name.to_string(),
+                field_type,
+                required: true,
+                description: String::new(),
+            });
+        }
+    }
+
+    fields
+}
+
 // ─── AstScanner implementation ─────────────────────────────────────────────
 
 impl AstScanner for TreeSitterScanner {
@@ -748,6 +1096,7 @@ impl AstScanner for TreeSitterScanner {
         let raw_imports = match family {
             LangFamily::Python => python_extract_imports(source_code, &tree),
             LangFamily::TypeScript => ts_extract_imports(source_code, &tree),
+            LangFamily::Go => go_extract_imports(source_code, &tree),
         };
 
         let deps = raw_imports
@@ -765,17 +1114,20 @@ impl AstScanner for TreeSitterScanner {
         &self,
         file_path: &Path,
         source_code: &str,
-    ) -> Result<(Vec<DiscoveredStruct>, Vec<DiscoveredMethod>)> {
+    ) -> Result<ScanResult> {
         let (tree, family) = match self.parse_tree(file_path, source_code)? {
             Some(pair) => pair,
-            None => return Ok((vec![], vec![])),
+            None => return Ok((vec![], vec![], vec![], vec![])),
         };
 
         let fp = file_path.to_string_lossy().to_string();
 
-        match family {
-            LangFamily::Python => Ok(python_extract_classes(source_code, &tree, &fp)),
-            LangFamily::TypeScript => Ok(ts_extract_classes(source_code, &tree, &fp)),
-        }
+        let (structs, methods) = match family {
+            LangFamily::Python => python_extract_classes(source_code, &tree, &fp),
+            LangFamily::TypeScript => ts_extract_classes(source_code, &tree, &fp),
+            LangFamily::Go => go_extract_structs_and_methods(source_code, &tree, &fp),
+        };
+
+        Ok((structs, vec![], methods, vec![]))
     }
 }

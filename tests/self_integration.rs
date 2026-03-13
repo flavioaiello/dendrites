@@ -1,0 +1,640 @@
+//! Self-model integration test: dendrites models itself.
+//!
+//! This test exercises the full MCP tool lifecycle against the dendrites
+//! codebase itself, proving that the server is a valuable higher-domain
+//! abstraction layer. The flow:
+//!
+//!   1. **refactor(scan)** → AST-extract the actual dendrites domain model
+//!   2. **get_model** → verify the scanned model is persisted & queryable
+//!   3. **set_model** → enrich the desired model with domain knowledge
+//!   4. **get_model** → verify mutations are visible
+//!   5. **Datalog queries** → run Datalog queries proving cross-cutting insights
+//!   6. **refactor(plan)** → diff actual vs desired, get actionable plan
+//!   7. **refactor(accept)** → promote desired → actual
+//!   8. **refactor(reset)** → revert desired to actual
+//!   9. **Datalog reasoning** → prove value: queries impossible without the graph
+
+use serde_json::{json, Value};
+use std::env::temp_dir;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use dendrites::domain::analyze::scan_actual_model;
+use dendrites::mcp::tools::call_tool;
+use dendrites::mcp::write_tools::call_write_tool;
+use dendrites::store::cozo::canonicalize_path;
+use dendrites::store::Store;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+fn temp_store() -> Store {
+    static CTR: AtomicU64 = AtomicU64::new(0);
+    let id = CTR.fetch_add(1, Ordering::SeqCst);
+    let path = temp_dir().join(format!(
+        "dendrites_self_integ_{}_{}.db",
+        std::process::id(),
+        id
+    ));
+    Store::open(&path).expect("Failed to open temp store")
+}
+
+/// Extract the text payload from a tool call result, panic if error.
+fn unwrap_tool_text(result: &dendrites::mcp::protocol::ToolCallResult) -> Value {
+    assert_ne!(result.is_error, Some(true), "Tool call returned error: {:?}", result.content);
+    match &result.content[0] {
+        dendrites::mcp::protocol::ContentBlock::Text { text } => {
+            serde_json::from_str(text).unwrap_or_else(|_| json!(text))
+        }
+    }
+}
+
+/// The real dendrites workspace root (this repository).
+fn dendrites_root() -> std::path::PathBuf {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest.to_path_buf()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 1: Scan → Persist → Show round-trip on dendrites itself
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_scan_persist_show_roundtrip() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // ── Step 1: Scan actual model from dendrites source ────────────────
+    let actual = scan_actual_model(&ws_root, None)
+        .expect("scan_actual_model must succeed on dendrites source");
+
+    // dendrites has src/{domain,mcp,server,store} → at least 4 bounded contexts
+    assert!(
+        !actual.bounded_contexts.is_empty(),
+        "Scan must discover at least one bounded context"
+    );
+
+    let total_entities: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
+    let total_services: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
+    let total_vos: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
+
+    eprintln!("── Self-scan results ──");
+    eprintln!("  Bounded contexts: {}", actual.bounded_contexts.len());
+    for bc in &actual.bounded_contexts {
+        eprintln!(
+            "    {} → {} entities, {} services, {} VOs, {} events, {} deps",
+            bc.name, bc.entities.len(), bc.services.len(),
+            bc.value_objects.len(), bc.events.len(), bc.dependencies.len()
+        );
+    }
+
+    // ── Step 2: Persist to CozoDB ──────────────────────────────────────
+    store.save_desired(&ws, &actual)
+        .expect("save_desired must succeed");
+    store.save_actual(&ws, &actual)
+        .expect("save_actual must succeed");
+
+    // ── Step 3: Show actual model via MCP tool ─────────────────────────
+    let show_result = call_tool(&store, &ws, "get_model", &json!({}));
+    let show_json = unwrap_tool_text(&show_result);
+    assert!(
+        show_json["actual"].is_object(),
+        "get_model must return an actual model object after save_actual"
+    );
+
+    let shown_contexts = show_json["actual"]["bounded_contexts"]
+        .as_array()
+        .expect("Model must have bounded_contexts array");
+    assert_eq!(
+        shown_contexts.len(),
+        actual.bounded_contexts.len(),
+        "get_model must return same number of contexts as scanned"
+    );
+
+    // ── Step 4: Verify entities survived the round-trip ────────────────
+    let shown_entity_count: usize = shown_contexts
+        .iter()
+        .map(|bc| bc["entities"].as_array().map_or(0, |e| e.len()))
+        .sum();
+    assert_eq!(
+        shown_entity_count, total_entities,
+        "Entity count must match between scan and show"
+    );
+
+    eprintln!("  Round-trip verified: {} entities, {} services, {} VOs",
+        total_entities, total_services, total_vos);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 2: Mutate desired model — enrich with domain knowledge
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_mutate_and_enrich_desired_model() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // Scan and persist actual first
+    let actual = scan_actual_model(&ws_root, None).expect("scan failed");
+    store.save_actual(&ws, &actual).expect("save_actual failed");
+    // Copy actual → desired as baseline (accept in reverse: save desired = actual)
+    store.save_desired(&ws, &actual).expect("save_desired failed");
+
+    // ── Mutate: Add a bounded context ──────────────────────────────────
+    let result = call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "bounded_context",
+        "name": "Reasoning",
+        "description": "Symbolic logic and Datalog reasoning layer",
+        "module_path": "src/domain"
+    }));
+    let mutate_json = unwrap_tool_text(&result);
+    assert!(
+        mutate_json.to_string().to_lowercase().contains("reason"),
+        "Mutate response should reference the new context: {:?}", mutate_json
+    );
+
+    // ── Mutate: Add an entity to the new context ───────────────────────
+    let result = call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "entity",
+        "context": "Reasoning",
+        "name": "DomainModel",
+        "description": "Root aggregate representing the complete domain model graph",
+        "aggregate_root": true,
+        "fields": [
+            {"name": "name", "type": "String", "required": true},
+            {"name": "description", "type": "String", "required": false},
+            {"name": "bounded_contexts", "type": "Vec<BoundedContext>", "required": true}
+        ],
+        "methods": [
+            {"name": "empty", "description": "Create empty model", "parameters": [{"name": "workspace_path", "type": "String"}], "return_type": "DomainModel"},
+            {"name": "validate", "description": "Validate model consistency", "parameters": [], "return_type": "Result<()>"}
+        ],
+        "invariants": ["Name must not be empty", "At least one bounded context required for non-empty model"]
+    }));
+    unwrap_tool_text(&result);
+
+    // ── Mutate: Add a value object ─────────────────────────────────────
+    let result = call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "value_object",
+        "context": "Reasoning",
+        "name": "Ownership",
+        "description": "Team ownership metadata for any domain element",
+        "fields": [
+            {"name": "team", "type": "String", "required": false},
+            {"name": "owners", "type": "Vec<String>", "required": false},
+            {"name": "rationale", "type": "String", "required": false}
+        ],
+        "validation_rules": ["At least team or owners must be specified if ownership is set"]
+    }));
+    unwrap_tool_text(&result);
+
+    // ── Mutate: Add a service ──────────────────────────────────────────
+    let result = call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "service",
+        "context": "Reasoning",
+        "name": "AnalyzeService",
+        "description": "AST extraction and domain classification engine",
+        "service_kind": "domain",
+        "methods": [
+            {"name": "scan_actual_model", "description": "Extract model from source AST", "parameters": [{"name": "workspace_root", "type": "Path"}, {"name": "desired", "type": "Option<DomainModel>"}], "return_type": "Result<DomainModel>"}
+        ]
+    }));
+    unwrap_tool_text(&result);
+
+    // ── Mutate: Add a domain event ─────────────────────────────────────
+    let result = call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "event",
+        "context": "Reasoning",
+        "name": "ModelScanned",
+        "description": "Emitted after successful model extraction from source",
+        "source": "DomainModel",
+        "fields": [
+            {"name": "workspace", "type": "String", "required": true},
+            {"name": "context_count", "type": "usize", "required": true},
+            {"name": "entity_count", "type": "usize", "required": true}
+        ]
+    }));
+    unwrap_tool_text(&result);
+
+    // ── Show desired model ─────────────────────────────────────────────
+    let show_result = call_tool(&store, &ws, "get_model", &json!({}));
+    let show_json = unwrap_tool_text(&show_result);
+
+    let desired_contexts = show_json["desired"]["bounded_contexts"]
+        .as_array()
+        .expect("Must have bounded_contexts");
+
+    // The Reasoning context must exist in the desired model
+    let reasoning = desired_contexts
+        .iter()
+        .find(|bc| bc["name"] == "Reasoning")
+        .expect("Reasoning context must be in desired model");
+    assert!(
+        reasoning["entities"].as_array().unwrap().iter().any(|e| e["name"] == "DomainModel"),
+        "DomainModel entity must be in Reasoning context"
+    );
+    assert!(
+        reasoning["services"].as_array().unwrap().iter().any(|s| s["name"] == "AnalyzeService"),
+        "AnalyzeService must be in Reasoning context"
+    );
+    assert!(
+        reasoning["events"].as_array().unwrap().iter().any(|e| e["name"] == "ModelScanned"),
+        "ModelScanned event must be in Reasoning context"
+    );
+    assert!(
+        reasoning["value_objects"].as_array().unwrap().iter().any(|v| v["name"] == "Ownership"),
+        "Ownership VO must be in Reasoning context"
+    );
+
+    eprintln!("── Desired model enriched with {} contexts ──", desired_contexts.len());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 3: Query model — Datalog reasoning that proves MCP value
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_query_cross_cutting_insights() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // Set up: scan actual + copy to desired
+    let actual = scan_actual_model(&ws_root, None).expect("scan failed");
+    store.save_actual(&ws, &actual).expect("save_actual failed");
+    store.save_desired(&ws, &actual).expect("save_desired failed");
+
+    let canonical = dendrites::store::cozo::canonicalize_path(&ws);
+
+    // ── Query 1: List all bounded contexts ─────────────────────────────
+    let rows = store.run_datalog(
+        "?[name, module_path] := *context{workspace: $ws, name, module_path, state: 'actual'}",
+        &canonical,
+    ).expect("query 1 failed");
+    assert!(!rows.is_empty(), "Must have at least one context");
+    eprintln!("── Query: {} bounded contexts found ──", rows.len());
+
+    // ── Query 2: List all entities across all contexts ─────────────────
+    let rows = store.run_datalog(
+        "?[ctx, name, aggregate_root] := *entity{workspace: $ws, context: ctx, name, aggregate_root, state: 'actual'}",
+        &canonical,
+    ).expect("query 2 failed");
+    assert!(!rows.is_empty(), "Must have at least one entity");
+    eprintln!("── Query: {} entities found ──", rows.len());
+
+    // ── Query 3: Cross-cutting field type analysis ─────────────────────
+    let rows = store.run_datalog(
+        "?[ctx, owner_kind, owner, field_name] := *field{workspace: $ws, context: ctx, owner_kind, owner, name: field_name, field_type: 'String', state: 'actual'}",
+        &canonical,
+    ).expect("query 3 failed");
+    eprintln!("── Query: {} fields of type String ──", rows.len());
+
+    // ── Query 4: Find all public methods across all services ───────────
+    let rows = store.run_datalog(
+        "?[ctx, service, method_name, return_type] := *method{workspace: $ws, context: ctx, owner_kind: 'service', owner: service, name: method_name, return_type, state: 'actual'}",
+        &canonical,
+    ).expect("query 4 failed");
+    eprintln!("── Query: {} service methods found ──", rows.len());
+
+    // ── Query 5: Count elements per context (aggregation) ──────────────
+    let rows = store.run_datalog(
+        "ctx_entities[ctx, count(name)] := *entity{workspace: $ws, context: ctx, name, state: 'actual'} ?[ctx, entity_count] := ctx_entities[ctx, entity_count]",
+        &canonical,
+    ).expect("query 5 failed");
+    assert!(!rows.is_empty(), "Must have entity counts per context");
+
+    // ── Query 6: All value objects in the model ────────────────────────
+    let rows = store.run_datalog(
+        "?[ctx, name, description] := *value_object{workspace: $ws, context: ctx, name, description, state: 'actual'}",
+        &canonical,
+    ).expect("query 6 failed");
+    eprintln!("── Query: {} value objects found ──", rows.len());
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 4: Refactor lifecycle — plan → accept → reset
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_refactor_lifecycle() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // Set up: scan actual, copy to desired, then mutate desired
+    let actual = scan_actual_model(&ws_root, None).expect("scan failed");
+    store.save_actual(&ws, &actual).expect("save_actual failed");
+    store.save_desired(&ws, &actual).expect("save_desired failed");
+
+    // ── Step 1: Plan with no changes → should be in_sync ───────────────
+    let result = call_write_tool(&ws, &store, "refactor_model", &json!({"action": "plan"}));
+    let plan_json = unwrap_tool_text(&result);
+    // When actual == desired, expect in_sync or empty changes
+    let is_sync = plan_json.get("status")
+        .map(|s| s == "in_sync")
+        .unwrap_or(false);
+    let has_no_changes = plan_json.get("pending_changes")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(false);
+    assert!(
+        is_sync || has_no_changes,
+        "Plan with no changes should be in_sync: {:?}", plan_json
+    );
+    eprintln!("── Refactor plan (no changes): in_sync ──");
+
+    // ── Step 2: Mutate desired → create divergence ─────────────────────
+    call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "bounded_context",
+        "name": "Telemetry",
+        "description": "Observability and metrics collection",
+        "module_path": "src/telemetry"
+    }));
+    call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "entity",
+        "context": "Telemetry",
+        "name": "MetricPoint",
+        "description": "A single metric data point",
+        "aggregate_root": true,
+        "fields": [
+            {"name": "name", "type": "String", "required": true},
+            {"name": "value", "type": "f64", "required": true},
+            {"name": "timestamp", "type": "DateTime", "required": true}
+        ],
+        "invariants": ["Name must not be empty", "Value must be finite"]
+    }));
+
+    // ── Step 3: Plan with changes → should show pending_changes ────────
+    let result = call_write_tool(&ws, &store, "refactor_model", &json!({"action": "plan"}));
+    let plan_json = unwrap_tool_text(&result);
+    let changes = plan_json.get("pending_changes")
+        .and_then(|v| v.as_array())
+        .or_else(|| plan_json.get("changes").and_then(|v| v.as_array()));
+    assert!(
+        changes.is_some_and(|c| !c.is_empty()),
+        "Plan with mutations should show pending changes: {:?}", plan_json
+    );
+    let change_count = changes.map_or(0, |c| c.len());
+    eprintln!("── Refactor plan: {} pending changes ──", change_count);
+
+    // ── Step 4: Accept → promote desired to actual ─────────────────────
+    let result = call_write_tool(&ws, &store, "refactor_model", &json!({"action": "accept"}));
+    let accept_json = unwrap_tool_text(&result);
+    assert_eq!(
+        accept_json.get("status").and_then(|s| s.as_str()),
+        Some("accepted"),
+        "Accept must succeed: {:?}", accept_json
+    );
+
+    // Verify: plan should now be in_sync
+    let result = call_write_tool(&ws, &store, "refactor_model", &json!({"action": "plan"}));
+    let plan_json = unwrap_tool_text(&result);
+    let is_sync = plan_json.get("status")
+        .map(|s| s == "in_sync")
+        .unwrap_or(false);
+    let has_no_changes = plan_json.get("pending_changes")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(false);
+    assert!(
+        is_sync || has_no_changes,
+        "After accept, plan should be in_sync: {:?}", plan_json
+    );
+
+    // Verify: actual model now includes Telemetry
+    let show_result = call_tool(&store, &ws, "get_model", &json!({}));
+    let show_json = unwrap_tool_text(&show_result);
+    let actual_contexts = show_json["actual"]["bounded_contexts"]
+        .as_array()
+        .expect("Must have bounded_contexts");
+    assert!(
+        actual_contexts.iter().any(|bc| bc["name"] == "Telemetry"),
+        "Telemetry context must be in actual after accept"
+    );
+    eprintln!("── Accept: desired promoted to actual ──");
+
+    // ── Step 5: Mutate again, then reset ───────────────────────────────
+    call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "bounded_context",
+        "name": "Ephemeral",
+        "description": "This should be discarded by reset",
+        "module_path": "src/ephemeral"
+    }));
+
+    let result = call_write_tool(&ws, &store, "refactor_model", &json!({"action": "reset"}));
+    let reset_json = unwrap_tool_text(&result);
+    assert_eq!(
+        reset_json.get("status").and_then(|s| s.as_str()),
+        Some("reset"),
+        "Reset must succeed: {:?}", reset_json
+    );
+
+    // Verify: desired should no longer have Ephemeral
+    let show_result = call_tool(&store, &ws, "get_model", &json!({}));
+    let show_json = unwrap_tool_text(&show_result);
+    let desired_contexts = show_json["desired"]["bounded_contexts"]
+        .as_array()
+        .expect("Must have bounded_contexts");
+    assert!(
+        !desired_contexts.iter().any(|bc| bc["name"] == "Ephemeral"),
+        "Ephemeral context must NOT be in desired after reset"
+    );
+    // But Telemetry should still be there (was accepted into actual)
+    assert!(
+        desired_contexts.iter().any(|bc| bc["name"] == "Telemetry"),
+        "Telemetry context must survive in desired after reset (was in actual)"
+    );
+    eprintln!("── Reset: desired reverted to actual, Ephemeral discarded ──");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 5: Prove MCP value — queries impossible without the graph
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_model_proves_mcp_value() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // Full setup: scan + persist actual + copy to desired
+    let actual = scan_actual_model(&ws_root, None).expect("scan failed");
+    store.save_actual(&ws, &actual).expect("save_actual failed");
+    store.save_desired(&ws, &actual).expect("save_desired failed");
+
+    let canonical = canonicalize_path(&ws);
+
+    // ── Value 1: "Which structs have the most fields?" ─────────────────
+    // This cross-cutting query spans all contexts and owner types —
+    // impossible without the relational graph.
+    let rows = store.run_datalog(
+        "field_count[ctx, ok, owner, count(name)] := *field{workspace: $ws, context: ctx, owner_kind: ok, owner, name, state: 'actual'} ?[ctx, owner_kind, owner, n_fields] := field_count[ctx, owner_kind, owner, n_fields], n_fields > 2",
+        &canonical,
+    ).expect("datalog query failed");
+    eprintln!("── Value: Structs with >2 fields: {} ──", rows.len());
+
+    // ── Value 2: "Entities that might be missing invariants" ────────────
+    let missing = store.aggregate_roots_without_invariants(
+        &canonical
+    ).unwrap_or_default();
+    eprintln!("── Value: {} aggregate roots without invariants ──", missing.len());
+
+    // ── Value 3: "All value objects in the model" ──────────────────────
+    let rows = store.run_datalog(
+        "?[ctx, name, description] := *value_object{workspace: $ws, context: ctx, name, description, state: 'actual'}",
+        &canonical,
+    ).expect("datalog query failed");
+    let vo_count = rows.len();
+    eprintln!("── Value: {} value objects across all contexts ──", vo_count);
+
+    // ── Value 4: "Service dependency graph" ────────────────────────────
+    let rows = store.run_datalog(
+        "?[ctx, service, dep] := *service_dep{workspace: $ws, context: ctx, service, dep, state: 'actual'}",
+        &canonical,
+    ).expect("datalog query failed");
+    eprintln!("── Value: {} service dependencies ──", rows.len());
+
+    // ── Value 5: "Cross-context method parameter type usage" ───────────
+    // Find all method parameters grouped by type — only possible with
+    // first-class method_param relations.
+    let rows = store.run_datalog(
+        "type_usage[param_type, count(name)] := *method_param{workspace: $ws, name, param_type, state: 'actual'} ?[param_type, usage_count] := type_usage[param_type, usage_count], usage_count > 1",
+        &canonical,
+    ).expect("datalog query failed");
+    eprintln!("── Value: {} parameter types used >1 time ──", rows.len());
+
+    // ── Value 6: Full model statistics ─────────────────────────────────
+    let result = call_tool(&store, &ws, "get_model", &json!({}));
+    let show = unwrap_tool_text(&result);
+    let model = &show["actual"];
+    assert!(model.is_object(), "Model must be present");
+    let contexts = model["bounded_contexts"].as_array().unwrap();
+    let total_entities: usize = contexts.iter()
+        .map(|bc| bc["entities"].as_array().map_or(0, |e| e.len()))
+        .sum();
+    let total_services: usize = contexts.iter()
+        .map(|bc| bc["services"].as_array().map_or(0, |s| s.len()))
+        .sum();
+    let total_vos: usize = contexts.iter()
+        .map(|bc| bc["value_objects"].as_array().map_or(0, |v| v.len()))
+        .sum();
+
+    eprintln!("═══ Self-Model Summary ════════════════════════════════");
+    eprintln!("  Bounded contexts : {}", contexts.len());
+    eprintln!("  Entities         : {}", total_entities);
+    eprintln!("  Services         : {}", total_services);
+    eprintln!("  Value objects    : {}", total_vos);
+    eprintln!("═══════════════════════════════════════════════════════");
+
+    // Final assertion: the model is non-trivial
+    assert!(contexts.len() >= 3, "dendrites should have at least 3 bounded contexts (domain, mcp, server, store)");
+    assert!(total_entities + total_services + total_vos >= 10, "dendrites should have at least 10 domain elements total");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 6: End-to-end via MCP tool dispatch (refactor scan action)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_scan_via_mcp_tool_dispatch() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // Use the MCP write_tool dispatch directly (same path as MCP clients)
+    let result = call_write_tool(&ws, &store, "scan_model", &json!({}));
+    let scan_json = unwrap_tool_text(&result);
+
+    assert_eq!(scan_json["status"], "scanned", "scan_model must succeed: {:?}", scan_json);
+    assert!(
+        scan_json["entities"].as_u64().unwrap_or(0) > 0,
+        "Must discover entities: {:?}", scan_json
+    );
+    assert!(
+        scan_json["contexts_scanned"].as_u64().unwrap_or(0) > 0,
+        "Must scan contexts: {:?}", scan_json
+    );
+
+    eprintln!("── refactor(scan) via MCP: {} ──", scan_json["message"]);
+
+    // Now get_model must work
+    let show_result = call_tool(&store, &ws, "get_model", &json!({}));
+    let show_json = unwrap_tool_text(&show_result);
+    assert!(
+        show_json["actual"].is_object() && show_json["actual"]["bounded_contexts"].is_array(),
+        "get_model must return actual model after scan: {:?}", show_json
+    );
+
+    let ctx_count = show_json["actual"]["bounded_contexts"]
+        .as_array()
+        .map_or(0, |a| a.len());
+    assert!(ctx_count > 0, "Must have contexts after scan");
+    eprintln!("── get_model after scan: {} contexts ──", ctx_count);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Phase 7: Remove elements — prove mutation completeness
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn self_mutate_remove_elements() {
+    let store = temp_store();
+    let ws_root = dendrites_root();
+    let ws = ws_root.to_string_lossy().to_string();
+
+    // Scan and baseline
+    let actual = scan_actual_model(&ws_root, None).expect("scan failed");
+    store.save_actual(&ws, &actual).expect("save_actual failed");
+    store.save_desired(&ws, &actual).expect("save_desired failed");
+
+    // Add elements to remove
+    call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "bounded_context",
+        "name": "Disposable",
+        "description": "Context to be removed",
+        "module_path": "src/disposable"
+    }));
+    call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "entity",
+        "context": "Disposable",
+        "name": "Throwaway",
+        "description": "Entity to be removed",
+        "fields": [{"name": "id", "type": "u64", "required": true}]
+    }));
+
+    // Verify they exist
+    let show = call_tool(&store, &ws, "get_model", &json!({}));
+    let json = unwrap_tool_text(&show);
+    let contexts = json["desired"]["bounded_contexts"].as_array().unwrap();
+    assert!(
+        contexts.iter().any(|bc| bc["name"] == "Disposable"),
+        "Disposable must exist before removal"
+    );
+
+    // Remove entity first
+    let result = call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "entity",
+        "action": "remove",
+        "context": "Disposable",
+        "name": "Throwaway"
+    }));
+    unwrap_tool_text(&result);
+
+    // Remove context
+    let result = call_write_tool(&ws, &store, "set_model", &json!({
+        "kind": "bounded_context",
+        "action": "remove",
+        "name": "Disposable"
+    }));
+    unwrap_tool_text(&result);
+
+    // Verify removal
+    let show = call_tool(&store, &ws, "get_model", &json!({}));
+    let json = unwrap_tool_text(&show);
+    let contexts = json["desired"]["bounded_contexts"].as_array().unwrap();
+    assert!(
+        !contexts.iter().any(|bc| bc["name"] == "Disposable"),
+        "Disposable must be gone after removal"
+    );
+    eprintln!("── Remove: context + entity successfully deleted ──");
+}

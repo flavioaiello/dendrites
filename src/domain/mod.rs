@@ -1,5 +1,8 @@
 pub mod model;
 pub mod analyze;
+pub mod scanner;
+pub mod rust_syn;
+pub mod polyglot;
 
 
 /// Convert PascalCase / camelCase to snake_case.

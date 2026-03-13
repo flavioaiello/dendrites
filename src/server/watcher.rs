@@ -23,15 +23,17 @@ impl ActualStateWatcher {
         // 1. Initialize the file system watcher
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
             if let Ok(event) = res {
-                let is_rust_file = event.paths.iter().any(|p| {
-                    // Filter: only .rs files, never inside target/ directories
-                    p.extension().is_some_and(|ext| ext == "rs")
+                let is_source_file = event.paths.iter().any(|p| {
+                    // Filter: only .rs/.py/.ts/.tsx files, never inside target/ or node_modules/ directories
+                    p.extension().is_some_and(|ext| {
+                        ext == "rs" || ext == "py" || ext == "ts" || ext == "tsx"
+                    })
                         && !p.components().any(|c| {
-                            c.as_os_str() == "target"
+                            c.as_os_str() == "target" || c.as_os_str() == "node_modules"
                         })
                 });
 
-                if is_rust_file {
+                if is_source_file {
                     let _ = tx.try_send(());
                 }
             }

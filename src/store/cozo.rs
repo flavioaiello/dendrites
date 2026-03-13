@@ -83,6 +83,34 @@ impl Store {
             }
         }
 
+        // Migration v2: tables lacked file_path/start_line/end_line columns
+        let needs_v2 = db
+            .run_script(
+                "?[x] := *service{file_path: x}",
+                Default::default(),
+                ScriptMutability::Immutable,
+            )
+            .is_err()
+            && db
+                .run_script(
+                    "?[x] := *service{name: x}",
+                    Default::default(),
+                    ScriptMutability::Immutable,
+                )
+                .is_ok();
+
+        if needs_v2 {
+            for t in [
+                "entity", "service", "event", "value_object", "repository", "module",
+            ] {
+                let _ = db.run_script(
+                    &format!("::remove {t}"),
+                    Default::default(),
+                    ScriptMutability::Mutable,
+                );
+            }
+        }
+
         let schemas = vec![
             // Project metadata (rules/tech/conventions as JSON — config, not domain topology)
             ":create project { workspace: String => name: String, description: String default '', updated_at: String, rules_json: String default '[]', tech_stack_json: String default '{}', conventions_json: String default '{}' }",
@@ -92,15 +120,16 @@ impl Store {
             ":create owner_meta { workspace: String, context: String, owner_kind: String, owner: String, state: String => team: String default '', owners_json: String default '[]', rationale: String default '' }",
             ":create aggregate { workspace: String, context: String, name: String, state: String => description: String default '', root_entity: String default '' }",
             ":create aggregate_member { workspace: String, context: String, aggregate: String, member_kind: String, member: String, state: String }",
-            ":create entity { workspace: String, context: String, name: String, state: String => description: String default '', aggregate_root: Bool default false }",
+            ":create entity { workspace: String, context: String, name: String, state: String => description: String default '', aggregate_root: Bool default false, file_path: String default '', start_line: Int default 0, end_line: Int default 0 }",
             ":create policy { workspace: String, context: String, name: String, state: String => description: String default '', kind: String default 'domain' }",
             ":create policy_link { workspace: String, context: String, policy: String, link_kind: String, link: String, idx: Int, state: String }",
             ":create read_model { workspace: String, context: String, name: String, state: String => description: String default '', source: String default '' }",
-            ":create service { workspace: String, context: String, name: String, state: String => description: String default '', kind: String default 'domain' }",
+            ":create service { workspace: String, context: String, name: String, state: String => description: String default '', kind: String default 'domain', file_path: String default '', start_line: Int default 0, end_line: Int default 0 }",
             ":create service_dep { workspace: String, context: String, service: String, dep: String, state: String }",
-            ":create event { workspace: String, context: String, name: String, state: String => description: String default '', source: String default '' }",
-            ":create value_object { workspace: String, context: String, name: String, state: String => description: String default '' }",
-            ":create repository { workspace: String, context: String, name: String, state: String => aggregate: String default '' }",
+            ":create event { workspace: String, context: String, name: String, state: String => description: String default '', source: String default '', file_path: String default '', start_line: Int default 0, end_line: Int default 0 }",
+            ":create value_object { workspace: String, context: String, name: String, state: String => description: String default '', file_path: String default '', start_line: Int default 0, end_line: Int default 0 }",
+            ":create repository { workspace: String, context: String, name: String, state: String => aggregate: String default '', file_path: String default '', start_line: Int default 0, end_line: Int default 0 }",
+            ":create module { workspace: String, context: String, name: String, state: String => path: String default '', public: Bool default false, file_path: String default '', description: String default '' }",
             ":create external_system { workspace: String, name: String, state: String => description: String default '', kind: String default '', rationale: String default '' }",
             ":create external_system_context { workspace: String, system: String, context: String, idx: Int, state: String }",
             ":create api_endpoint { workspace: String, context: String, id: String, state: String => service_id: String default '', method: String default '', route_pattern: String default '', description: String default '' }",
@@ -115,6 +144,9 @@ impl Store {
             ":create method { workspace: String, context: String, owner_kind: String, owner: String, name: String, state: String => description: String default '', return_type: String default '', idx: Int default 0 }",
             ":create method_param { workspace: String, context: String, owner_kind: String, owner: String, method: String, name: String, state: String => param_type: String default '', required: Bool default false, description: String default '', idx: Int default 0 }",
             ":create vo_rule { workspace: String, context: String, value_object: String, idx: Int, state: String => text: String }",
+            // ── Architecture policy relations ──
+            ":create layer_assignment { workspace: String, context: String => layer: String }",
+            ":create dependency_constraint { workspace: String, constraint_kind: String, source: String, target: String => rule: String default 'forbidden' }",
             // Ephemeral — no state column
             ":create live_import { workspace: String, from_file: String, to_module: String }",
         ];
@@ -573,6 +605,9 @@ impl Store {
                         description: dv_str(&r[1]),
                         parameters: parms.into_iter().map(|(_, p)| p).collect(),
                         return_type: dv_str(&r[2]),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     },
                 )
             })
@@ -755,8 +790,11 @@ impl Store {
             for entity in &bc.entities {
                 let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &entity.name), ("st", state), ("desc", &entity.description)]);
                 params.insert("agg".into(), cozo::DataValue::Bool(entity.aggregate_root));
+                params.insert("file".into(), cozo::DataValue::Str(entity.file_path.as_deref().unwrap_or("").into()));
+                params.insert("sl".into(), int_dv(entity.start_line.unwrap_or(0) as i64));
+                params.insert("el".into(), int_dv(entity.end_line.unwrap_or(0) as i64));
                 self.db.run_script(
-                    "?[workspace, context, name, state, description, aggregate_root] <- [[$ws, $ctx, $name, $st, $desc, $agg]] :put entity { workspace, context, name, state => description, aggregate_root }",
+                    "?[workspace, context, name, state, description, aggregate_root, file_path, start_line, end_line] <- [[$ws, $ctx, $name, $st, $desc, $agg, $file, $sl, $el]] :put entity { workspace, context, name, state => description, aggregate_root, file_path, start_line, end_line }",
                     params,
                     ScriptMutability::Mutable,
                 ).map_err(|e| anyhow::anyhow!("save entity '{}': {:?}", entity.name, e))?;
@@ -833,9 +871,13 @@ impl Store {
             }
 for svc in &bc.services {
                 let kind_str = format!("{:?}", svc.kind).to_lowercase();
+                let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &svc.name), ("st", state), ("desc", &svc.description), ("kind", &kind_str)]);
+                params.insert("file".into(), cozo::DataValue::Str(svc.file_path.as_deref().unwrap_or("").into()));
+                params.insert("sl".into(), int_dv(svc.start_line.unwrap_or(0) as i64));
+                params.insert("el".into(), int_dv(svc.end_line.unwrap_or(0) as i64));
                 self.db.run_script(
-                    "?[workspace, context, name, state, description, kind] <- [[$ws, $ctx, $name, $st, $desc, $kind]] :put service { workspace, context, name, state => description, kind }",
-                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &svc.name), ("st", state), ("desc", &svc.description), ("kind", &kind_str)]),
+                    "?[workspace, context, name, state, description, kind, file_path, start_line, end_line] <- [[$ws, $ctx, $name, $st, $desc, $kind, $file, $sl, $el]] :put service { workspace, context, name, state => description, kind, file_path, start_line, end_line }",
+                    params,
                     ScriptMutability::Mutable,
                 ).map_err(|e| anyhow::anyhow!("save service '{}': {:?}", svc.name, e))?;
                 self.save_methods(workspace, &bc.name, "service", &svc.name, &svc.methods, state)?;
@@ -849,18 +891,26 @@ for svc in &bc.services {
             }
 
             for evt in &bc.events {
+                let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &evt.name), ("st", state), ("desc", &evt.description), ("src", &evt.source)]);
+                params.insert("file".into(), cozo::DataValue::Str(evt.file_path.as_deref().unwrap_or("").into()));
+                params.insert("sl".into(), int_dv(evt.start_line.unwrap_or(0) as i64));
+                params.insert("el".into(), int_dv(evt.end_line.unwrap_or(0) as i64));
                 self.db.run_script(
-                    "?[workspace, context, name, state, description, source] <- [[$ws, $ctx, $name, $st, $desc, $src]] :put event { workspace, context, name, state => description, source }",
-                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &evt.name), ("st", state), ("desc", &evt.description), ("src", &evt.source)]),
+                    "?[workspace, context, name, state, description, source, file_path, start_line, end_line] <- [[$ws, $ctx, $name, $st, $desc, $src, $file, $sl, $el]] :put event { workspace, context, name, state => description, source, file_path, start_line, end_line }",
+                    params,
                     ScriptMutability::Mutable,
                 ).map_err(|e| anyhow::anyhow!("save event '{}': {:?}", evt.name, e))?;
                 self.save_fields(workspace, &bc.name, "event", &evt.name, &evt.fields, state)?;
             }
 
             for vo in &bc.value_objects {
+                let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &vo.name), ("st", state), ("desc", &vo.description)]);
+                params.insert("file".into(), cozo::DataValue::Str(vo.file_path.as_deref().unwrap_or("").into()));
+                params.insert("sl".into(), int_dv(vo.start_line.unwrap_or(0) as i64));
+                params.insert("el".into(), int_dv(vo.end_line.unwrap_or(0) as i64));
                 self.db.run_script(
-                    "?[workspace, context, name, state, description] <- [[$ws, $ctx, $name, $st, $desc]] :put value_object { workspace, context, name, state => description }",
-                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &vo.name), ("st", state), ("desc", &vo.description)]),
+                    "?[workspace, context, name, state, description, file_path, start_line, end_line] <- [[$ws, $ctx, $name, $st, $desc, $file, $sl, $el]] :put value_object { workspace, context, name, state => description, file_path, start_line, end_line }",
+                    params,
                     ScriptMutability::Mutable,
                 ).map_err(|e| anyhow::anyhow!("save value_object '{}': {:?}", vo.name, e))?;
                 self.save_fields(workspace, &bc.name, "value_object", &vo.name, &vo.fields, state)?;
@@ -876,12 +926,34 @@ for svc in &bc.services {
             }
 
             for repo in &bc.repositories {
+                let mut params = params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &repo.name), ("st", state), ("agg", &repo.aggregate)]);
+                params.insert("file".into(), cozo::DataValue::Str(repo.file_path.as_deref().unwrap_or("").into()));
+                params.insert("sl".into(), int_dv(repo.start_line.unwrap_or(0) as i64));
+                params.insert("el".into(), int_dv(repo.end_line.unwrap_or(0) as i64));
                 self.db.run_script(
-                    "?[workspace, context, name, state, aggregate] <- [[$ws, $ctx, $name, $st, $agg]] :put repository { workspace, context, name, state => aggregate }",
-                    params_map(&[("ws", workspace), ("ctx", &bc.name), ("name", &repo.name), ("st", state), ("agg", &repo.aggregate)]),
+                    "?[workspace, context, name, state, aggregate, file_path, start_line, end_line] <- [[$ws, $ctx, $name, $st, $agg, $file, $sl, $el]] :put repository { workspace, context, name, state => aggregate, file_path, start_line, end_line }",
+                    params,
                     ScriptMutability::Mutable,
                 ).map_err(|e| anyhow::anyhow!("save repository '{}': {:?}", repo.name, e))?;
                 self.save_methods(workspace, &bc.name, "repository", &repo.name, &repo.methods, state)?;
+            }
+
+            for module in &bc.modules {
+                let mut params = params_map(&[
+                    ("ws", workspace),
+                    ("ctx", &bc.name),
+                    ("name", &module.name),
+                    ("st", state),
+                    ("path", &module.path),
+                    ("fp", &module.file_path),
+                    ("desc", &module.description),
+                ]);
+                params.insert("public".into(), cozo::DataValue::Bool(module.public));
+                self.db.run_script(
+                    "?[workspace, context, name, state, path, public, file_path, description] <- [[$ws, $ctx, $name, $st, $path, $public, $fp, $desc]] :put module { workspace, context, name, state => path, public, file_path, description }",
+                    params,
+                    ScriptMutability::Mutable,
+                ).map_err(|e| anyhow::anyhow!("save module '{}': {:?}", module.name, e))?;
             }
         }
 
@@ -952,6 +1024,7 @@ for svc in &bc.services {
             ("event", "workspace, context, name, state"),
             ("value_object", "workspace, context, name, state"),
             ("repository", "workspace, context, name, state"),
+            ("module", "workspace, context, name, state"),
             ("external_system", "workspace, name, state"),
             ("external_system_context", "workspace, system, context, idx, state"),
             ("architectural_decision", "workspace, id, state"),
@@ -1230,6 +1303,9 @@ for svc in &bc.services {
                         fields: self.query_fields(&ws, &ctx_name, "entity", &ename, state),
                         methods: self.query_methods(&ws, &ctx_name, "entity", &ename, state),
                         invariants: self.query_invariants(&ws, &ctx_name, &ename, state),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }
                 })
                 .collect();
@@ -1336,6 +1412,9 @@ for svc in &bc.services {
                         },
                         methods: self.query_methods(&ws, &ctx_name, "service", &svc_name, state),
                         dependencies: svc_deps.iter().map(|r| dv_str(&r[0])).collect(),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }
                 })
                 .collect();
@@ -1376,6 +1455,9 @@ for svc in &bc.services {
                         description: dv_str(&r[1]),
                         source: dv_str(&r[2]),
                         fields: self.query_fields(&ws, &ctx_name, "event", &ename, state),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }
                 })
                 .collect();
@@ -1400,6 +1482,9 @@ for svc in &bc.services {
                         description: dv_str(&r[1]),
                         fields: self.query_fields(&ws, &ctx_name, "value_object", &voname, state),
                         validation_rules: self.query_vo_rules(&ws, &ctx_name, &voname, state),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }
                 })
                 .collect();
@@ -1423,7 +1508,32 @@ for svc in &bc.services {
                         name: rname.clone(),
                         aggregate: dv_str(&r[1]),
                         methods: self.query_methods(&ws, &ctx_name, "repository", &rname, state),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }
+                })
+                .collect();
+
+            // Modules
+            let mods = self
+                .db
+                .run_script(
+                    "?[name, path, public, file_path, description] := \
+                        *module{workspace: $ws, context: $ctx, name, state: $st, path, public, file_path, description}",
+                    params_map(&[("ws", &ws), ("ctx", &ctx_name), ("st", state)]),
+                    ScriptMutability::Immutable,
+                )
+                .map(|r| r.rows)
+                .unwrap_or_default();
+            let modules: Vec<Module> = mods
+                .iter()
+                .map(|r| Module {
+                    name: dv_str(&r[0]),
+                    path: dv_str(&r[1]),
+                    public: r[2].get_bool().unwrap_or(false),
+                    file_path: dv_str(&r[3]),
+                    description: dv_str(&r[4]),
                 })
                 .collect();
 
@@ -1441,6 +1551,7 @@ for svc in &bc.services {
                 api_endpoints,
                 repositories,
                 events,
+                modules,
                 dependencies,
             });
         }
@@ -1540,6 +1651,9 @@ for svc in &bc.services {
             fields: self.query_fields(&ws, ctx, "entity", name, "desired"),
             methods: self.query_methods(&ws, ctx, "entity", name, "desired"),
             invariants: self.query_invariants(&ws, ctx, name, "desired"),
+            file_path: None,
+            start_line: None,
+            end_line: None,
         })
     }
 
@@ -1566,6 +1680,9 @@ for svc in &bc.services {
             },
             methods: self.query_methods(&ws, ctx, "service", name, "desired"),
             dependencies: dep_rows.iter().map(|r| dv_str(&r[0])).collect(),
+            file_path: None,
+            start_line: None,
+            end_line: None,
         })
     }
 
@@ -1582,6 +1699,9 @@ for svc in &bc.services {
             description: dv_str(&row[0]),
             fields: self.query_fields(&ws, ctx, "event", name, "desired"),
             source: dv_str(&row[1]),
+            file_path: None,
+            start_line: None,
+            end_line: None,
         })
     }
 
@@ -1598,6 +1718,9 @@ for svc in &bc.services {
             description: dv_str(&row[0]),
             fields: self.query_fields(&ws, ctx, "value_object", name, "desired"),
             validation_rules: self.query_vo_rules(&ws, ctx, name, "desired"),
+            file_path: None,
+            start_line: None,
+            end_line: None,
         })
     }
 
@@ -1613,6 +1736,9 @@ for svc in &bc.services {
             name: name.to_string(),
             aggregate: dv_str(&row[0]),
             methods: self.query_methods(&ws, ctx, "repository", name, "desired"),
+            file_path: None,
+            start_line: None,
+            end_line: None,
         })
     }
 
@@ -1967,6 +2093,53 @@ for svc in &bc.services {
         Ok(true)
     }
 
+    pub fn query_module(&self, ws: &str, ctx: &str, name: &str) -> Option<Module> {
+        let ws = canonicalize_path(ws);
+        let rows = self.db.run_script(
+            "?[path, public, file_path, description] := *module{workspace: $ws, context: $ctx, name: $name, state: 'desired', path, public, file_path, description}",
+            params_map(&[("ws", &ws), ("ctx", ctx), ("name", name)]),
+            ScriptMutability::Immutable,
+        ).ok()?.rows;
+        let row = rows.first()?;
+        Some(Module {
+            name: name.to_string(),
+            path: dv_str(&row[0]),
+            public: matches!(&row[1], cozo::DataValue::Bool(true)),
+            file_path: dv_str(&row[2]),
+            description: dv_str(&row[3]),
+        })
+    }
+
+    pub fn upsert_module(&self, workspace_path: &str, ctx: &str, module: &Module) -> Result<()> {
+        let ws = canonicalize_path(workspace_path);
+        self.ensure_project(workspace_path)?;
+        let mut params = params_map(&[("ws", &ws), ("ctx", ctx), ("name", &module.name), ("path", &module.path), ("fp", &module.file_path), ("desc", &module.description)]);
+        params.insert("public".into(), cozo::DataValue::Bool(module.public));
+        self.db.run_script(
+            "?[workspace, context, name, state, path, public, file_path, description] <- [[$ws, $ctx, $name, 'desired', $path, $public, $fp, $desc]] :put module { workspace, context, name, state => path, public, file_path, description }",
+            params,
+            ScriptMutability::Mutable,
+        ).map_err(|e| anyhow::anyhow!("upsert_module: {:?}", e))?;
+        Ok(())
+    }
+
+    pub fn remove_module(&self, workspace_path: &str, ctx: &str, name: &str) -> Result<bool> {
+        let ws = canonicalize_path(workspace_path);
+        let p = params_map(&[("ws", &ws), ("ctx", ctx), ("name", name)]);
+        let exists = self.db.run_script(
+            "?[n] := *module{workspace: $ws, context: $ctx, name: $name, state: 'desired'}, n = $name",
+            p.clone(),
+            ScriptMutability::Immutable,
+        ).map(|r| !r.rows.is_empty()).unwrap_or(false);
+        if !exists { return Ok(false); }
+        self.db.run_script(
+            "?[workspace, context, name, state] <- [[$ws, $ctx, $name, 'desired']] :rm module { workspace, context, name, state }",
+            p,
+            ScriptMutability::Mutable,
+        ).map_err(|e| anyhow::anyhow!("remove_module: {:?}", e))?;
+        Ok(true)
+    }
+
     pub fn upsert_aggregate(&self, workspace_path: &str, ctx: &str, aggregate: &Aggregate) -> Result<()> {
         let ws = canonicalize_path(workspace_path);
         self.db.run_script(
@@ -2288,6 +2461,227 @@ for svc in &bc.services {
             .collect())
     }
 
+    // ── Architecture Policy Operations ────────────────────────────────────
+
+    /// Assign a bounded context to an architectural layer.
+    pub fn upsert_layer_assignment(
+        &self,
+        workspace: &str,
+        context: &str,
+        layer: &str,
+    ) -> Result<()> {
+        let ws = canonicalize_path(workspace);
+        let params = params_map(&[("ws", &ws), ("ctx", context), ("layer", layer)]);
+        self.db
+            .run_script(
+                "?[workspace, context, layer] <- [[$ws, $ctx, $layer]] \
+                 :put layer_assignment { workspace, context => layer }",
+                params,
+                ScriptMutability::Mutable,
+            )
+            .map_err(|e| anyhow::anyhow!("upsert_layer_assignment: {:?}", e))?;
+        Ok(())
+    }
+
+    /// Remove a layer assignment for a bounded context.
+    pub fn remove_layer_assignment(
+        &self,
+        workspace: &str,
+        context: &str,
+    ) -> Result<bool> {
+        let ws = canonicalize_path(workspace);
+        let params = params_map(&[("ws", &ws), ("ctx", context)]);
+        let existing = self
+            .db
+            .run_script(
+                "?[workspace, context] := *layer_assignment{workspace: $ws, context: $ctx} \
+                 :rm layer_assignment { workspace, context }",
+                params,
+                ScriptMutability::Mutable,
+            )
+            .map_err(|e| anyhow::anyhow!("remove_layer_assignment: {:?}", e))?;
+        Ok(!existing.rows.is_empty())
+    }
+
+    /// Add a dependency constraint between layers or contexts.
+    /// `constraint_kind` is `"layer"` or `"context"`.
+    /// `rule` is `"forbidden"` or `"allowed"`.
+    pub fn upsert_dependency_constraint(
+        &self,
+        workspace: &str,
+        constraint_kind: &str,
+        source: &str,
+        target: &str,
+        rule: &str,
+    ) -> Result<()> {
+        let ws = canonicalize_path(workspace);
+        let params = params_map(&[
+            ("ws", &ws),
+            ("kind", constraint_kind),
+            ("src", source),
+            ("tgt", target),
+            ("rule", rule),
+        ]);
+        self.db
+            .run_script(
+                "?[workspace, constraint_kind, source, target, rule] <- [[$ws, $kind, $src, $tgt, $rule]] \
+                 :put dependency_constraint { workspace, constraint_kind, source, target => rule }",
+                params,
+                ScriptMutability::Mutable,
+            )
+            .map_err(|e| anyhow::anyhow!("upsert_dependency_constraint: {:?}", e))?;
+        Ok(())
+    }
+
+    /// Remove a dependency constraint.
+    pub fn remove_dependency_constraint(
+        &self,
+        workspace: &str,
+        constraint_kind: &str,
+        source: &str,
+        target: &str,
+    ) -> Result<bool> {
+        let ws = canonicalize_path(workspace);
+        let params = params_map(&[
+            ("ws", &ws),
+            ("kind", constraint_kind),
+            ("src", source),
+            ("tgt", target),
+        ]);
+        let existing = self
+            .db
+            .run_script(
+                "?[workspace, constraint_kind, source, target] := \
+                    *dependency_constraint{workspace: $ws, constraint_kind: $kind, source: $src, target: $tgt} \
+                 :rm dependency_constraint { workspace, constraint_kind, source, target }",
+                params,
+                ScriptMutability::Mutable,
+            )
+            .map_err(|e| anyhow::anyhow!("remove_dependency_constraint: {:?}", e))?;
+        Ok(!existing.rows.is_empty())
+    }
+
+    /// List all layer assignments for a workspace.
+    pub fn list_layer_assignments(
+        &self,
+        workspace: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let ws = canonicalize_path(workspace);
+        let params = params_map(&[("ws", &ws)]);
+        let result = self
+            .db
+            .run_script(
+                "?[context, layer] := *layer_assignment{workspace: $ws, context, layer}",
+                params,
+                ScriptMutability::Immutable,
+            )
+            .map_err(|e| anyhow::anyhow!("list_layer_assignments: {:?}", e))?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|r| (dv_str(&r[0]), dv_str(&r[1])))
+            .collect())
+    }
+
+    /// List all dependency constraints for a workspace.
+    pub fn list_dependency_constraints(
+        &self,
+        workspace: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let ws = canonicalize_path(workspace);
+        let params = params_map(&[("ws", &ws)]);
+        let result = self
+            .db
+            .run_script(
+                "?[constraint_kind, source, target, rule] := \
+                    *dependency_constraint{workspace: $ws, constraint_kind, source, target, rule}",
+                params,
+                ScriptMutability::Immutable,
+            )
+            .map_err(|e| anyhow::anyhow!("list_dependency_constraints: {:?}", e))?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|r| (dv_str(&r[0]), dv_str(&r[1]), dv_str(&r[2]), dv_str(&r[3])))
+            .collect())
+    }
+
+    /// Evaluate policy violations: find context dependencies that violate layer
+    /// or context-level forbidden constraints.
+    pub fn evaluate_policy_violations(
+        &self,
+        workspace: &str,
+    ) -> Result<serde_json::Value> {
+        let ws = canonicalize_path(workspace);
+        let params = params_map(&[("ws", &ws)]);
+
+        // Layer-based violations: context A (layer X) depends on context B (layer Y)
+        // where X→Y is forbidden
+        let layer_violations = self
+            .db
+            .run_script(
+                "?[from_ctx, to_ctx, from_layer, to_layer] := \
+                    *context_dep{workspace: $ws, from_ctx, to_ctx, state: 'desired'}, \
+                    *layer_assignment{workspace: $ws, context: from_ctx, layer: from_layer}, \
+                    *layer_assignment{workspace: $ws, context: to_ctx, layer: to_layer}, \
+                    *dependency_constraint{workspace: $ws, constraint_kind: 'layer', \
+                        source: from_layer, target: to_layer, rule: 'forbidden'}",
+                params.clone(),
+                ScriptMutability::Immutable,
+            )
+            .map_err(|e| anyhow::anyhow!("policy layer violations: {:?}", e))?;
+
+        // Context-level violations: context A depends on context B where A→B is forbidden
+        let context_violations = self
+            .db
+            .run_script(
+                "?[from_ctx, to_ctx] := \
+                    *context_dep{workspace: $ws, from_ctx, to_ctx, state: 'desired'}, \
+                    *dependency_constraint{workspace: $ws, constraint_kind: 'context', \
+                        source: from_ctx, target: to_ctx, rule: 'forbidden'}",
+                params,
+                ScriptMutability::Immutable,
+            )
+            .map_err(|e| anyhow::anyhow!("policy context violations: {:?}", e))?;
+
+        let layer_items: Vec<serde_json::Value> = layer_violations
+            .rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "kind": "layer",
+                    "from_context": dv_str(&r[0]),
+                    "to_context": dv_str(&r[1]),
+                    "from_layer": dv_str(&r[2]),
+                    "to_layer": dv_str(&r[3]),
+                    "rule": "forbidden",
+                })
+            })
+            .collect();
+
+        let context_items: Vec<serde_json::Value> = context_violations
+            .rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "kind": "context",
+                    "from_context": dv_str(&r[0]),
+                    "to_context": dv_str(&r[1]),
+                    "rule": "forbidden",
+                })
+            })
+            .collect();
+
+        let all_violations: Vec<serde_json::Value> =
+            layer_items.into_iter().chain(context_items).collect();
+
+        Ok(json!({
+            "status": if all_violations.is_empty() { "true" } else { "false" },
+            "violations": all_violations,
+            "count": all_violations.len(),
+        }))
+    }
+
     pub fn impact_analysis(
         &self,
         workspace: &str,
@@ -2367,6 +2761,66 @@ for svc in &bc.services {
             .collect())
     }
 
+
+    pub fn query_dependency_path(
+        &self,
+        workspace: &str,
+        from_context: &str,
+        to_context: &str,
+    ) -> Result<Vec<Vec<String>>> {
+        let params = params_map(&[("ws", workspace), ("from_ctx", from_context), ("to_ctx", to_context)]);
+        let result = self
+            .db
+            .run_script(
+                "reachable[a, b] := *context_dep{workspace: $ws, from_ctx: a, to_ctx: b, state: 'desired'} \
+                 reachable[a, c] := reachable[a, b], *context_dep{workspace: $ws, from_ctx: b, to_ctx: c, state: 'desired'} \
+                 on_path[a, b] := *context_dep{workspace: $ws, from_ctx: a, to_ctx: b, state: 'desired'}, reachable[a, $to_ctx], a == $from_ctx \
+                 on_path[a, b] := *context_dep{workspace: $ws, from_ctx: a, to_ctx: b, state: 'desired'}, reachable[$from_ctx, a], reachable[b, $to_ctx] \
+                 on_path[a, b] := *context_dep{workspace: $ws, from_ctx: a, to_ctx: b, state: 'desired'}, reachable[$from_ctx, a], b == $to_ctx \
+                 ?[a, b] := on_path[a, b]",
+                params,
+                ScriptMutability::Immutable,
+            )
+            .map_err(|e| anyhow::anyhow!("query_dependency_path: {:?}", e))?;
+        
+        Ok(result.rows.iter().map(|r| vec![dv_str(&r[0]), dv_str(&r[1])]).collect())
+    }
+
+    pub fn can_delete_symbol(
+        &self,
+        workspace: &str,
+        context: &str,
+        entity_name: &str,
+    ) -> Result<serde_json::Value> {
+        let params = params_map(&[("ws", workspace), ("ctx", context), ("ent", entity_name)]);
+        
+        let aggreg = self.db.run_script(
+            "?[agg] := *aggregate_member{workspace: $ws, context: $ctx, member: $ent, state: 'desired', aggregate: agg}",
+            params.clone(),
+            ScriptMutability::Immutable,
+        ).map_err(|e| anyhow::anyhow!("check aggregate: {:?}", e))?;
+
+        let events = self.db.run_script(
+            "?[evt] := *event{workspace: $ws, context: $ctx, source: $ent, state: 'desired', name: evt}",
+            params.clone(),
+            ScriptMutability::Immutable,
+        ).map_err(|e| anyhow::anyhow!("check events: {:?}", e))?;
+        
+        let repos = self.db.run_script(
+            "?[repo] := *repository{workspace: $ws, context: $ctx, aggregate: $ent, state: 'desired', name: repo}",
+            params.clone(),
+            ScriptMutability::Immutable,
+        ).map_err(|e| anyhow::anyhow!("check repo: {:?}", e))?;
+
+        let has_deps = !aggreg.rows.is_empty() || !events.rows.is_empty() || !repos.rows.is_empty();
+
+        Ok(serde_json::json!({
+            "can_delete": !has_deps,
+            "aggregates_referencing": aggreg.rows.iter().map(|r| dv_str(&r[0])).collect::<Vec<_>>(),
+            "events_sourced": events.rows.iter().map(|r| dv_str(&r[0])).collect::<Vec<_>>(),
+            "repositories_managing": repos.rows.iter().map(|r| dv_str(&r[0])).collect::<Vec<_>>(),
+        }))
+    }
     pub fn dependency_graph(&self, workspace: &str) -> Result<serde_json::Value> {
         let params = params_map(&[("ws", workspace)]);
         let contexts = self
@@ -2701,6 +3155,9 @@ mod tests {
                         }],
                         methods: vec![],
                         invariants: vec!["Email must be unique".into()],
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }],
                     value_objects: vec![],
                     services: vec![Service {
@@ -2709,9 +3166,13 @@ mod tests {
                         kind: ServiceKind::Application,
                         methods: vec![],
                         dependencies: vec![],
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }],
                     repositories: vec![],
                     events: vec![],
+                    modules: vec![],
                     dependencies: vec![],
                 },
                 BoundedContext {
@@ -2730,11 +3191,15 @@ mod tests {
                         fields: vec![],
                         methods: vec![],
                         invariants: vec![],
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }],
                     value_objects: vec![],
                     services: vec![],
                     repositories: vec![],
                     events: vec![],
+                    modules: vec![],
                     dependencies: vec!["Identity".into()],
                 },
             ],
@@ -2809,6 +3274,9 @@ mod tests {
                                 },
                             ],
                             return_type: "Product".into(),
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
                         },
                         Method {
                             name: "update_price".into(),
@@ -2820,12 +3288,18 @@ mod tests {
                                 description: "".into(),
                             }],
                             return_type: "".into(),
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
                         },
                     ],
                     invariants: vec![
                         "Name must not be empty".into(),
                         "Price must be positive".into(),
                     ],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
                 value_objects: vec![ValueObject {
                     name: "Money".into(),
@@ -2848,6 +3322,9 @@ mod tests {
                         "Amount must be non-negative".into(),
                         "Currency must be ISO 4217".into(),
                     ],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
                 services: vec![Service {
                     name: "CatalogService".into(),
@@ -2858,8 +3335,14 @@ mod tests {
                         description: "List all products".into(),
                         parameters: vec![],
                         return_type: "Vec<Product>".into(),
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     }],
                     dependencies: vec![],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
                 repositories: vec![Repository {
                     name: "ProductRepository".into(),
@@ -2875,6 +3358,9 @@ mod tests {
                                 description: "".into(),
                             }],
                             return_type: "Option<Product>".into(),
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
                         },
                         Method {
                             name: "save".into(),
@@ -2886,8 +3372,14 @@ mod tests {
                                 description: "".into(),
                             }],
                             return_type: "".into(),
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
                         },
                     ],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
                 events: vec![DomainEvent {
                     name: "ProductCreated".into(),
@@ -2907,7 +3399,11 @@ mod tests {
                             description: "".into(),
                         },
                     ],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 }],
+                modules: vec![],
                 dependencies: vec![],
             }],
             external_systems: vec![],
@@ -3121,6 +3617,9 @@ mod tests {
                 description: "".into(),
                 parameters: vec![],
                 return_type: "Vec<Product>".into(),
+                file_path: None,
+                start_line: None,
+                end_line: None,
             });
         store.save_desired(ws, &modified).unwrap();
 
@@ -3242,6 +3741,7 @@ mod tests {
             services: vec![],
             repositories: vec![],
             events: vec![],
+            modules: vec![],
             dependencies: vec![],
         });
         store.save_desired(ws, &modified).unwrap();

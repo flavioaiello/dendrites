@@ -65,13 +65,14 @@ fn ecommerce_model() -> DomainModel {
                                 parameters: vec![
                                     Field { name: "name".into(), field_type: "String".into(), required: true, description: "".into() },
                                     Field { name: "price".into(), field_type: "Money".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                             Method { name: "update_price".into(), description: "".into(), return_type: "".into(),
                                 parameters: vec![
                                     Field { name: "new_price".into(), field_type: "Money".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                         ],
                         invariants: vec!["Name must not be empty".into(), "Price must be positive".into()],
+                        file_path: None, start_line: None, end_line: None,
                     },
                     Entity {
                         name: "Category".into(),
@@ -83,6 +84,7 @@ fn ecommerce_model() -> DomainModel {
                         ],
                         methods: vec![],
                         invariants: vec![],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
                 value_objects: vec![
@@ -94,6 +96,7 @@ fn ecommerce_model() -> DomainModel {
                             Field { name: "currency".into(), field_type: "CurrencyCode".into(), required: true, description: "".into() },
                         ],
                         validation_rules: vec!["Amount >= 0".into(), "Currency is ISO 4217".into()],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
                 services: vec![
@@ -102,13 +105,14 @@ fn ecommerce_model() -> DomainModel {
                         description: "".into(),
                         kind: ServiceKind::Application,
                         methods: vec![
-                            Method { name: "list_products".into(), description: "".into(), return_type: "Vec<Product>".into(), parameters: vec![] },
+                            Method { name: "list_products".into(), description: "".into(), return_type: "Vec<Product>".into(), parameters: vec![], file_path: None, start_line: None, end_line: None },
                             Method { name: "get_product".into(), description: "".into(), return_type: "Product".into(),
                                 parameters: vec![
                                     Field { name: "id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                         ],
                         dependencies: vec![],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
                 repositories: vec![
@@ -119,12 +123,13 @@ fn ecommerce_model() -> DomainModel {
                             Method { name: "find_by_id".into(), description: "".into(), return_type: "Option<Product>".into(),
                                 parameters: vec![
                                     Field { name: "id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                             Method { name: "save".into(), description: "".into(), return_type: "".into(),
                                 parameters: vec![
                                     Field { name: "product".into(), field_type: "Product".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                         ],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
                 events: vec![
@@ -137,6 +142,7 @@ fn ecommerce_model() -> DomainModel {
                             Field { name: "name".into(), field_type: "String".into(), required: true, description: "".into() },
                             Field { name: "price".into(), field_type: "Money".into(), required: true, description: "".into() },
                         ],
+                        file_path: None, start_line: None, end_line: None,
                     },
                     DomainEvent {
                         name: "PriceChanged".into(),
@@ -147,8 +153,10 @@ fn ecommerce_model() -> DomainModel {
                             Field { name: "old_price".into(), field_type: "Money".into(), required: true, description: "".into() },
                             Field { name: "new_price".into(), field_type: "Money".into(), required: true, description: "".into() },
                         ],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
+                modules: vec![],
                 dependencies: vec![],
                 api_endpoints: vec![],
             },
@@ -176,10 +184,11 @@ fn ecommerce_model() -> DomainModel {
                                 parameters: vec![
                                     Field { name: "customer_id".into(), field_type: "CustomerId".into(), required: true, description: "".into() },
                                     Field { name: "items".into(), field_type: "Vec<OrderItem>".into(), required: true, description: "".into() },
-                                ] },
-                            Method { name: "cancel".into(), description: "".into(), return_type: "".into(), parameters: vec![] },
+                                ], file_path: None, start_line: None, end_line: None },
+                            Method { name: "cancel".into(), description: "".into(), return_type: "".into(), parameters: vec![], file_path: None, start_line: None, end_line: None },
                         ],
                         invariants: vec!["Order must have at least one item".into(), "Total must match item sum".into()],
+                        file_path: None, start_line: None, end_line: None,
                     },
                     Entity {
                         name: "OrderItem".into(),
@@ -192,6 +201,7 @@ fn ecommerce_model() -> DomainModel {
                         ],
                         methods: vec![],
                         invariants: vec!["Quantity must be > 0".into()],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
                 value_objects: vec![],
@@ -205,9 +215,10 @@ fn ecommerce_model() -> DomainModel {
                                 parameters: vec![
                                     Field { name: "customer_id".into(), field_type: "CustomerId".into(), required: true, description: "".into() },
                                     Field { name: "items".into(), field_type: "Vec<OrderItem>".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                         ],
                         dependencies: vec!["ProductRepository".into()],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
                 repositories: vec![
@@ -218,12 +229,13 @@ fn ecommerce_model() -> DomainModel {
                             Method { name: "find_by_id".into(), description: "".into(), return_type: "Option<Order>".into(),
                                 parameters: vec![
                                     Field { name: "id".into(), field_type: "OrderId".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                             Method { name: "save".into(), description: "".into(), return_type: "".into(),
                                 parameters: vec![
                                     Field { name: "order".into(), field_type: "Order".into(), required: true, description: "".into() },
-                                ] },
+                                ], file_path: None, start_line: None, end_line: None },
                         ],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
                 events: vec![
@@ -236,8 +248,10 @@ fn ecommerce_model() -> DomainModel {
                             Field { name: "customer_id".into(), field_type: "CustomerId".into(), required: true, description: "".into() },
                             Field { name: "total".into(), field_type: "Money".into(), required: true, description: "".into() },
                         ],
+                        file_path: None, start_line: None, end_line: None,
                     },
                 ],
+                modules: vec![],
                 dependencies: vec!["Catalog".into()],
                 api_endpoints: vec![],
             },
@@ -541,6 +555,9 @@ fn method_level_diff_with_first_class_methods() {
             description: "".into(),
         }],
         return_type: "Vec<Product>".into(),
+        file_path: None,
+        start_line: None,
+        end_line: None,
     });
     store.save_desired(&ws, &modified).unwrap();
 
@@ -736,6 +753,9 @@ fn perf_scale_10_contexts() {
                         required: true,
                         description: "".into(),
                     }],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
                 })
                 .collect();
             entities.push(Entity {
@@ -745,6 +765,9 @@ fn perf_scale_10_contexts() {
                 fields,
                 methods,
                 invariants: if j == 0 { vec!["Must be valid".into()] } else { vec![] },
+                file_path: None,
+                start_line: None,
+                end_line: None,
             });
         }
         contexts.push(BoundedContext {
@@ -760,6 +783,7 @@ fn perf_scale_10_contexts() {
             services: vec![],
             repositories: vec![],
             events: vec![],
+            modules: vec![],
             dependencies: if i > 0 { vec![format!("Context{}", i - 1)] } else { vec![] },
             api_endpoints: vec![],
         });
