@@ -1384,6 +1384,76 @@ fn go_extract_calls(source: &str, tree: &tree_sitter::Tree) -> Vec<CallInfo> {
     calls
 }
 
+// ─── Module extraction ─────────────────────────────────────────────────────────────
+
+use super::analyze::DiscoveredModule;
+
+/// Python: each .py file is a module, inferred from filename.
+fn python_extract_modules(file_path: &Path) -> Vec<DiscoveredModule> {
+    let stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if stem.is_empty() || stem == "__init__" {
+        return vec![];
+    }
+    vec![DiscoveredModule {
+        name: stem.to_string(),
+        public: true,
+        file_path: file_path.to_string_lossy().to_string(),
+        extends: vec![],
+        implements: vec![],
+        decorators: vec![],
+    }]
+}
+
+/// TypeScript: each .ts/.tsx file is a module, inferred from filename.
+fn ts_extract_modules(_source: &str, _tree: &tree_sitter::Tree, file_path: &Path) -> Vec<DiscoveredModule> {
+    let stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    if stem.is_empty() || stem == "index" {
+        return vec![];
+    }
+    vec![DiscoveredModule {
+        name: stem.to_string(),
+        public: true,
+        file_path: file_path.to_string_lossy().to_string(),
+        extends: vec![],
+        implements: vec![],
+        decorators: vec![],
+    }]
+}
+
+/// Go: extract `package <name>` declaration.
+fn go_extract_modules(source: &str, tree: &tree_sitter::Tree, file_path: &Path) -> Vec<DiscoveredModule> {
+    let query_str = "(package_clause (package_identifier) @pkg)";
+    let lang = tree.language();
+    let query = match Query::new(&lang, query_str) {
+        Ok(q) => q,
+        Err(_) => return vec![],
+    };
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    if let Some(m) = iter.next() {
+        if let Some(cap) = m.captures.first() {
+            let pkg_name = node_text(cap.node, source).to_string();
+            if pkg_name != "main" {
+                return vec![DiscoveredModule {
+                    name: pkg_name,
+                    public: true,
+                    file_path: file_path.to_string_lossy().to_string(),
+                    extends: vec![],
+                    implements: vec![],
+                    decorators: vec![],
+                }];
+            }
+        }
+    }
+    vec![]
+}
+
 // ─── AstScanner implementation ─────────────────────────────────────────────
 
 impl AstScanner for TreeSitterScanner {
@@ -1430,7 +1500,13 @@ impl AstScanner for TreeSitterScanner {
             LangFamily::Go => go_extract_structs_and_methods(source_code, &tree, &fp),
         };
 
-        Ok((structs, vec![], methods, vec![]))
+        let modules = match family {
+            LangFamily::Python => python_extract_modules(file_path),
+            LangFamily::TypeScript => ts_extract_modules(source_code, &tree, file_path),
+            LangFamily::Go => go_extract_modules(source_code, &tree, file_path),
+        };
+
+        Ok((structs, vec![], methods, modules))
     }
 
     fn extract_calls(&self, file_path: &Path, source_code: &str) -> Result<Vec<CallInfo>> {

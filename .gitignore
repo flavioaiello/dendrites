@@ -1,2 +1,3 @@
 /target
-.dendrites.DS_Store
+/.dendrites
+.DS_Store

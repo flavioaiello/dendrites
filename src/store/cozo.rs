@@ -3160,6 +3160,8 @@ impl Store {
             "fld_a[ctx, ok, ow, name] := *field{workspace: $ws, context: ctx, owner_kind: ok, owner: ow, name, state: 'actual' @ 'NOW'}",
             "mth_d[ctx, ok, ow, name] := *method{workspace: $ws, context: ctx, owner_kind: ok, owner: ow, name, state: 'desired' @ 'NOW'}",
             "mth_a[ctx, ok, ow, name] := *method{workspace: $ws, context: ctx, owner_kind: ok, owner: ow, name, state: 'actual' @ 'NOW'}",
+            "mod_d[ctx, name] := *module{workspace: $ws, context: ctx, name, state: 'desired' @ 'NOW'}",
+            "mod_a[ctx, name] := *module{workspace: $ws, context: ctx, name, state: 'actual' @ 'NOW'}",
             "inv_d[ctx, ow, text] := *invariant{workspace: $ws, context: ctx, entity: ow, text, state: 'desired' @ 'NOW'}",
             "inv_a[ctx, ow, text] := *invariant{workspace: $ws, context: ctx, entity: ow, text, state: 'actual' @ 'NOW'}",
             // ── Context ──
@@ -3180,6 +3182,9 @@ impl Store {
             // ── Repository ──
             "?[kind, action, ctx, name, owner_kind, owner] := repo_d[ctx, name], not repo_a[ctx, name], kind = 'repository', action = 'add', owner_kind = '', owner = ''",
             "?[kind, action, ctx, name, owner_kind, owner] := repo_a[ctx, name], not repo_d[ctx, name], kind = 'repository', action = 'remove', owner_kind = '', owner = ''",
+            // ── Module ──
+            "?[kind, action, ctx, name, owner_kind, owner] := mod_d[ctx, name], not mod_a[ctx, name], kind = 'module', action = 'add', owner_kind = '', owner = ''",
+            "?[kind, action, ctx, name, owner_kind, owner] := mod_a[ctx, name], not mod_d[ctx, name], kind = 'module', action = 'remove', owner_kind = '', owner = ''",
             // ── Field ──
             "?[kind, action, ctx, name, owner_kind, owner] := fld_d[ctx, owner_kind, owner, name], not fld_a[ctx, owner_kind, owner, name], kind = 'field', action = 'add'",
             "?[kind, action, ctx, name, owner_kind, owner] := fld_a[ctx, owner_kind, owner, name], not fld_d[ctx, owner_kind, owner, name], kind = 'field', action = 'remove'",
@@ -3264,6 +3269,10 @@ impl Store {
             ?[workspace, category, context, name, change_type] := vo_a[context, name], not vo_d[context, name], workspace = $ws, category = 'value_object', change_type = 'remove' \
             ?[workspace, category, context, name, change_type] := repo_d[context, name], not repo_a[context, name], workspace = $ws, category = 'repository', change_type = 'add' \
             ?[workspace, category, context, name, change_type] := repo_a[context, name], not repo_d[context, name], workspace = $ws, category = 'repository', change_type = 'remove' \
+            mod_d[ctx, name] := *module{workspace: $ws, context: ctx, name, state: 'desired' @ 'NOW'} \
+            mod_a[ctx, name] := *module{workspace: $ws, context: ctx, name, state: 'actual' @ 'NOW'} \
+            ?[workspace, category, context, name, change_type] := mod_d[context, name], not mod_a[context, name], workspace = $ws, category = 'module', change_type = 'add' \
+            ?[workspace, category, context, name, change_type] := mod_a[context, name], not mod_d[context, name], workspace = $ws, category = 'module', change_type = 'remove' \
             :put drift { workspace, category, context, name, change_type }";
 
         let result = self

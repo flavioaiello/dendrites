@@ -24,7 +24,7 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "kind": {
                         "type": "string",
-                        "enum": ["bounded_context", "aggregate", "entity", "policy", "read_model", "service", "event", "value_object", "repository", "external_system", "architectural_decision"],
+                        "enum": ["bounded_context", "aggregate", "entity", "policy", "read_model", "service", "event", "value_object", "repository", "module", "external_system", "architectural_decision"],
                         "description": "Type of model element to create/update/remove"
                     },
                     "action": {
@@ -35,7 +35,8 @@ pub fn list_write_tools() -> Vec<ToolDefinition> {
                     "context": { "type": "string", "description": "Bounded context name (required for entity, service, event)" },
                     "name": { "type": "string", "description": "Element name" },
                     "description": { "type": "string" },
-                    "module_path": { "type": "string", "description": "Module path (bounded_context only)" },
+                    "module_path": { "type": "string", "description": "Module path (bounded_context or module)" },
+                    "public": { "type": "boolean", "description": "Whether module is public (module only, default: true)" },
                     "dependencies": {
                         "type": "array", "items": { "type": "string" },
                         "description": "Dependencies (bounded_context: allowed context deps; service: service deps)"
@@ -255,6 +256,8 @@ fn dispatch_write_tool(
                 ("architectural_decision", "remove") => {
                     remove_architectural_decision(store, workspace_path, args)
                 }
+                ("module", "upsert") => upsert_module(store, workspace_path, args),
+                ("module", "remove") => remove_module_handler(store, workspace_path, args),
                 ("", _) => error_result("'kind' is required"),
                 (_, action) => error_result(format!("Unknown action '{action}' for kind '{kind}'")),
             }
@@ -874,6 +877,47 @@ fn remove_repository(store: &Store, workspace_path: &str, args: &Value) -> ToolC
     }
 }
 
+fn upsert_module(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let mod_name = arg_str(args, "name");
+    let existing = match require_context(store, workspace_path, &ctx_name) {
+        Ok(()) => store.query_module(workspace_path, &ctx_name, &mod_name),
+        Err(result) => return result,
+    };
+    let mut module = existing.clone().unwrap_or(Module {
+        name: mod_name.clone(),
+        path: String::new(),
+        public: true,
+        file_path: String::new(),
+        description: String::new(),
+    });
+    if let Some(desc) = args.get("description").and_then(|v| v.as_str()) {
+        module.description = desc.to_string();
+    }
+    if let Some(path) = args.get("module_path").and_then(|v| v.as_str()) {
+        module.path = path.to_string();
+    }
+    if let Some(public) = args.get("public").and_then(|v| v.as_bool()) {
+        module.public = public;
+    }
+    if let Err(e) = store.upsert_module(workspace_path, &ctx_name, &module) {
+        return error_result(format!("Failed to upsert module: {e}"));
+    }
+    text_result(json!({
+        "message": format!("{} module '{}' in '{}'", if existing.is_some() { "Updated" } else { "Created" }, mod_name, ctx_name),
+    }).to_string())
+}
+
+fn remove_module_handler(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
+    let ctx_name = arg_str(args, "context");
+    let mod_name = arg_str(args, "name");
+    match store.remove_module(workspace_path, &ctx_name, &mod_name) {
+        Ok(true) => text_result(format!("Removed module '{mod_name}' from '{ctx_name}'")),
+        Ok(false) => error_result(format!("Module '{mod_name}' not found in '{ctx_name}'")),
+        Err(e) => error_result(format!("Failed to remove module: {e}")),
+    }
+}
+
 fn upsert_aggregate(store: &Store, workspace_path: &str, args: &Value) -> ToolCallResult {
     let ctx_name = arg_str(args, "context");
     let aggregate_name = arg_str(args, "name");
@@ -882,6 +926,7 @@ fn upsert_aggregate(store: &Store, workspace_path: &str, args: &Value) -> ToolCa
         Ok(()) => store.query_aggregate(workspace_path, &ctx_name, &aggregate_name),
         Err(result) => return result,
     };
+
     let mut aggregate = existing.clone().unwrap_or(Aggregate {
         name: aggregate_name.clone(),
         description: String::new(),

@@ -2,9 +2,9 @@ class Dendrites < Formula
   desc "Domain Model Context Protocol Server — architectural meta-layer for GitHub Copilot"
   homepage "https://github.com/flavioaiello/dendrites"
   license "MIT"
-  url "https://github.com/flavioaiello/dendrites/archive/refs/tags/v0.2.0.tar.gz"
-  sha256 "199e05fff06acfb1a65e5276c44eb91f1503b1b48614b97cfe1ecf875684ce80"
-  version "0.2.0"
+  url "https://github.com/flavioaiello/dendrites/archive/refs/tags/v0.2.1.tar.gz"
+  # sha256 will be updated after release
+  version "0.2.1"
 
   head "https://github.com/flavioaiello/dendrites.git", branch: "main"
 
