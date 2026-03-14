@@ -270,7 +270,34 @@ fn has_cfg_test(attrs: &[syn::Attribute]) -> bool {
 fn type_to_string(ty: &syn::Type) -> String {
     let mut tokens = proc_macro2::TokenStream::new();
     quote::ToTokens::to_tokens(ty, &mut tokens);
-    tokens.to_string().replace(' ', "")
+    // Normalize whitespace: collapse runs of spaces but preserve a single space
+    // after lifetime tokens (e.g., `& 'a  DomainModel` → `&'a DomainModel`).
+    let raw = tokens.to_string();
+    let mut result = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == ' ' {
+            // Peek at what follows: keep exactly one space before identifiers
+            // that follow a lifetime (apostrophe + ident sequence).
+            while chars.peek() == Some(&' ') {
+                chars.next();
+            }
+            // Check if previous token ended with a lifetime identifier char
+            // and next is an alpha/underscore (type name after lifetime).
+            let prev_is_lifetime = result.chars().last().map_or(false, |c| c.is_alphanumeric());
+            let next_is_ident = chars.peek().map_or(false, |c| c.is_alphabetic() || *c == '_');
+            if prev_is_lifetime && next_is_ident {
+                // Check if we're after a lifetime ('a, 'b, etc.)
+                let has_lifetime = result.contains('\'');
+                if has_lifetime {
+                    result.push(' ');
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 fn is_option_type(ty: &syn::Type) -> bool {

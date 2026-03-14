@@ -520,6 +520,21 @@ enum StructKind {
 fn classify_struct(name: &str, fields: &[Field], methods: &[DiscoveredMethod]) -> StructKind {
     let upper = name.to_uppercase();
 
+    // ── Guard: ontology-definition structs are pure data models, not DDD roles ──
+    // A struct literally named "Service", "Repository", or "DomainEvent" with
+    // data fields (name, description, etc.) is a *model definition* for that
+    // concept, not an instance of the DDD role itself.
+    const ONTOLOGY_NAMES: &[&str] = &[
+        "SERVICE", "REPOSITORY", "DOMAINEVENT", "EVENT", "ENTITY",
+        "VALUEOBJECT", "AGGREGATE", "BOUNDEDCONTEXT",
+    ];
+    if ONTOLOGY_NAMES.contains(&upper.as_str()) {
+        let has_name_field = fields.iter().any(|f| f.name == "name");
+        if has_name_field {
+            return StructKind::ValueObject;
+        }
+    }
+
     // ── Naming conventions (suffix-based) ──
     if upper.ends_with("REPOSITORY") || upper.ends_with("REPO") {
         return StructKind::Repository;
