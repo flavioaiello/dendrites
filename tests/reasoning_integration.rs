@@ -22,11 +22,7 @@ use dendrites::store::Store;
 fn temp_store() -> Store {
     static CTR: AtomicU64 = AtomicU64::new(0);
     let id = CTR.fetch_add(1, Ordering::SeqCst);
-    let path = temp_dir().join(format!(
-        "dendrites_integ_{}_{}.db",
-        std::process::id(),
-        id
-    ));
+    let path = temp_dir().join(format!("dendrites_integ_{}_{}.db", std::process::id(), id));
     Store::open(&path).unwrap()
 }
 
@@ -55,105 +51,251 @@ fn ecommerce_model() -> DomainModel {
                         description: "A sellable product".into(),
                         aggregate_root: true,
                         fields: vec![
-                            Field { name: "id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                            Field { name: "name".into(), field_type: "String".into(), required: true, description: "".into() },
-                            Field { name: "price".into(), field_type: "Money".into(), required: true, description: "".into() },
-                            Field { name: "category_id".into(), field_type: "CategoryId".into(), required: false, description: "".into() },
+                            Field {
+                                name: "id".into(),
+                                field_type: "ProductId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "name".into(),
+                                field_type: "String".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "price".into(),
+                                field_type: "Money".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "category_id".into(),
+                                field_type: "CategoryId".into(),
+                                required: false,
+                                description: "".into(),
+                            },
                         ],
                         methods: vec![
-                            Method { name: "create".into(), description: "".into(), return_type: "Product".into(),
+                            Method {
+                                name: "create".into(),
+                                description: "".into(),
+                                return_type: "Product".into(),
                                 parameters: vec![
-                                    Field { name: "name".into(), field_type: "String".into(), required: true, description: "".into() },
-                                    Field { name: "price".into(), field_type: "Money".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
-                            Method { name: "update_price".into(), description: "".into(), return_type: "".into(),
-                                parameters: vec![
-                                    Field { name: "new_price".into(), field_type: "Money".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
+                                    Field {
+                                        name: "name".into(),
+                                        field_type: "String".into(),
+                                        required: true,
+                                        description: "".into(),
+                                    },
+                                    Field {
+                                        name: "price".into(),
+                                        field_type: "Money".into(),
+                                        required: true,
+                                        description: "".into(),
+                                    },
+                                ],
+                                file_path: None,
+                                start_line: None,
+                                end_line: None,
+                            },
+                            Method {
+                                name: "update_price".into(),
+                                description: "".into(),
+                                return_type: "".into(),
+                                parameters: vec![Field {
+                                    name: "new_price".into(),
+                                    field_type: "Money".into(),
+                                    required: true,
+                                    description: "".into(),
+                                }],
+                                file_path: None,
+                                start_line: None,
+                                end_line: None,
+                            },
                         ],
-                        invariants: vec!["Name must not be empty".into(), "Price must be positive".into()],
-                        file_path: None, start_line: None, end_line: None,
+                        invariants: vec![
+                            "Name must not be empty".into(),
+                            "Price must be positive".into(),
+                        ],
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     },
                     Entity {
                         name: "Category".into(),
                         description: "Product category".into(),
                         aggregate_root: true,
                         fields: vec![
-                            Field { name: "id".into(), field_type: "CategoryId".into(), required: true, description: "".into() },
-                            Field { name: "name".into(), field_type: "String".into(), required: true, description: "".into() },
+                            Field {
+                                name: "id".into(),
+                                field_type: "CategoryId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "name".into(),
+                                field_type: "String".into(),
+                                required: true,
+                                description: "".into(),
+                            },
                         ],
                         methods: vec![],
                         invariants: vec![],
-                        file_path: None, start_line: None, end_line: None,
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     },
                 ],
-                value_objects: vec![
-                    ValueObject {
-                        name: "Money".into(),
-                        description: "Monetary amount".into(),
-                        fields: vec![
-                            Field { name: "amount".into(), field_type: "Decimal".into(), required: true, description: "".into() },
-                            Field { name: "currency".into(), field_type: "CurrencyCode".into(), required: true, description: "".into() },
-                        ],
-                        validation_rules: vec!["Amount >= 0".into(), "Currency is ISO 4217".into()],
-                        file_path: None, start_line: None, end_line: None,
-                    },
-                ],
-                services: vec![
-                    Service {
-                        name: "CatalogService".into(),
-                        description: "".into(),
-                        kind: ServiceKind::Application,
-                        methods: vec![
-                            Method { name: "list_products".into(), description: "".into(), return_type: "Vec<Product>".into(), parameters: vec![], file_path: None, start_line: None, end_line: None },
-                            Method { name: "get_product".into(), description: "".into(), return_type: "Product".into(),
-                                parameters: vec![
-                                    Field { name: "id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
-                        ],
-                        dependencies: vec![],
-                        file_path: None, start_line: None, end_line: None,
-                    },
-                ],
-                repositories: vec![
-                    Repository {
-                        name: "ProductRepository".into(),
-                        aggregate: "Product".into(),
-                        methods: vec![
-                            Method { name: "find_by_id".into(), description: "".into(), return_type: "Option<Product>".into(),
-                                parameters: vec![
-                                    Field { name: "id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
-                            Method { name: "save".into(), description: "".into(), return_type: "".into(),
-                                parameters: vec![
-                                    Field { name: "product".into(), field_type: "Product".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
-                        ],
-                        file_path: None, start_line: None, end_line: None,
-                    },
-                ],
+                value_objects: vec![ValueObject {
+                    name: "Money".into(),
+                    description: "Monetary amount".into(),
+                    fields: vec![
+                        Field {
+                            name: "amount".into(),
+                            field_type: "Decimal".into(),
+                            required: true,
+                            description: "".into(),
+                        },
+                        Field {
+                            name: "currency".into(),
+                            field_type: "CurrencyCode".into(),
+                            required: true,
+                            description: "".into(),
+                        },
+                    ],
+                    validation_rules: vec!["Amount >= 0".into(), "Currency is ISO 4217".into()],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
+                }],
+                services: vec![Service {
+                    name: "CatalogService".into(),
+                    description: "".into(),
+                    kind: ServiceKind::Application,
+                    methods: vec![
+                        Method {
+                            name: "list_products".into(),
+                            description: "".into(),
+                            return_type: "Vec<Product>".into(),
+                            parameters: vec![],
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
+                        },
+                        Method {
+                            name: "get_product".into(),
+                            description: "".into(),
+                            return_type: "Product".into(),
+                            parameters: vec![Field {
+                                name: "id".into(),
+                                field_type: "ProductId".into(),
+                                required: true,
+                                description: "".into(),
+                            }],
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
+                        },
+                    ],
+                    dependencies: vec![],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
+                }],
+                repositories: vec![Repository {
+                    name: "ProductRepository".into(),
+                    aggregate: "Product".into(),
+                    methods: vec![
+                        Method {
+                            name: "find_by_id".into(),
+                            description: "".into(),
+                            return_type: "Option<Product>".into(),
+                            parameters: vec![Field {
+                                name: "id".into(),
+                                field_type: "ProductId".into(),
+                                required: true,
+                                description: "".into(),
+                            }],
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
+                        },
+                        Method {
+                            name: "save".into(),
+                            description: "".into(),
+                            return_type: "".into(),
+                            parameters: vec![Field {
+                                name: "product".into(),
+                                field_type: "Product".into(),
+                                required: true,
+                                description: "".into(),
+                            }],
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
+                        },
+                    ],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
+                }],
                 events: vec![
                     DomainEvent {
                         name: "ProductCreated".into(),
                         description: "".into(),
                         source: "Product".into(),
                         fields: vec![
-                            Field { name: "product_id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                            Field { name: "name".into(), field_type: "String".into(), required: true, description: "".into() },
-                            Field { name: "price".into(), field_type: "Money".into(), required: true, description: "".into() },
+                            Field {
+                                name: "product_id".into(),
+                                field_type: "ProductId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "name".into(),
+                                field_type: "String".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "price".into(),
+                                field_type: "Money".into(),
+                                required: true,
+                                description: "".into(),
+                            },
                         ],
-                        file_path: None, start_line: None, end_line: None,
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     },
                     DomainEvent {
                         name: "PriceChanged".into(),
                         description: "".into(),
                         source: "Product".into(),
                         fields: vec![
-                            Field { name: "product_id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                            Field { name: "old_price".into(), field_type: "Money".into(), required: true, description: "".into() },
-                            Field { name: "new_price".into(), field_type: "Money".into(), required: true, description: "".into() },
+                            Field {
+                                name: "product_id".into(),
+                                field_type: "ProductId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "old_price".into(),
+                                field_type: "Money".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "new_price".into(),
+                                field_type: "Money".into(),
+                                required: true,
+                                description: "".into(),
+                            },
                         ],
-                        file_path: None, start_line: None, end_line: None,
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     },
                 ],
                 modules: vec![],
@@ -174,83 +316,200 @@ fn ecommerce_model() -> DomainModel {
                         description: "A customer order".into(),
                         aggregate_root: true,
                         fields: vec![
-                            Field { name: "id".into(), field_type: "OrderId".into(), required: true, description: "".into() },
-                            Field { name: "customer_id".into(), field_type: "CustomerId".into(), required: true, description: "".into() },
-                            Field { name: "total".into(), field_type: "Money".into(), required: true, description: "".into() },
-                            Field { name: "status".into(), field_type: "OrderStatus".into(), required: true, description: "".into() },
+                            Field {
+                                name: "id".into(),
+                                field_type: "OrderId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "customer_id".into(),
+                                field_type: "CustomerId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "total".into(),
+                                field_type: "Money".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "status".into(),
+                                field_type: "OrderStatus".into(),
+                                required: true,
+                                description: "".into(),
+                            },
                         ],
                         methods: vec![
-                            Method { name: "place".into(), description: "".into(), return_type: "Order".into(),
+                            Method {
+                                name: "place".into(),
+                                description: "".into(),
+                                return_type: "Order".into(),
                                 parameters: vec![
-                                    Field { name: "customer_id".into(), field_type: "CustomerId".into(), required: true, description: "".into() },
-                                    Field { name: "items".into(), field_type: "Vec<OrderItem>".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
-                            Method { name: "cancel".into(), description: "".into(), return_type: "".into(), parameters: vec![], file_path: None, start_line: None, end_line: None },
+                                    Field {
+                                        name: "customer_id".into(),
+                                        field_type: "CustomerId".into(),
+                                        required: true,
+                                        description: "".into(),
+                                    },
+                                    Field {
+                                        name: "items".into(),
+                                        field_type: "Vec<OrderItem>".into(),
+                                        required: true,
+                                        description: "".into(),
+                                    },
+                                ],
+                                file_path: None,
+                                start_line: None,
+                                end_line: None,
+                            },
+                            Method {
+                                name: "cancel".into(),
+                                description: "".into(),
+                                return_type: "".into(),
+                                parameters: vec![],
+                                file_path: None,
+                                start_line: None,
+                                end_line: None,
+                            },
                         ],
-                        invariants: vec!["Order must have at least one item".into(), "Total must match item sum".into()],
-                        file_path: None, start_line: None, end_line: None,
+                        invariants: vec![
+                            "Order must have at least one item".into(),
+                            "Total must match item sum".into(),
+                        ],
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     },
                     Entity {
                         name: "OrderItem".into(),
                         description: "A line item".into(),
                         aggregate_root: false,
                         fields: vec![
-                            Field { name: "product_id".into(), field_type: "ProductId".into(), required: true, description: "".into() },
-                            Field { name: "quantity".into(), field_type: "u32".into(), required: true, description: "".into() },
-                            Field { name: "unit_price".into(), field_type: "Money".into(), required: true, description: "".into() },
+                            Field {
+                                name: "product_id".into(),
+                                field_type: "ProductId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "quantity".into(),
+                                field_type: "u32".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "unit_price".into(),
+                                field_type: "Money".into(),
+                                required: true,
+                                description: "".into(),
+                            },
                         ],
                         methods: vec![],
                         invariants: vec!["Quantity must be > 0".into()],
-                        file_path: None, start_line: None, end_line: None,
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
                     },
                 ],
                 value_objects: vec![],
-                services: vec![
-                    Service {
-                        name: "OrderService".into(),
+                services: vec![Service {
+                    name: "OrderService".into(),
+                    description: "".into(),
+                    kind: ServiceKind::Application,
+                    methods: vec![Method {
+                        name: "place_order".into(),
                         description: "".into(),
-                        kind: ServiceKind::Application,
-                        methods: vec![
-                            Method { name: "place_order".into(), description: "".into(), return_type: "Order".into(),
-                                parameters: vec![
-                                    Field { name: "customer_id".into(), field_type: "CustomerId".into(), required: true, description: "".into() },
-                                    Field { name: "items".into(), field_type: "Vec<OrderItem>".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
+                        return_type: "Order".into(),
+                        parameters: vec![
+                            Field {
+                                name: "customer_id".into(),
+                                field_type: "CustomerId".into(),
+                                required: true,
+                                description: "".into(),
+                            },
+                            Field {
+                                name: "items".into(),
+                                field_type: "Vec<OrderItem>".into(),
+                                required: true,
+                                description: "".into(),
+                            },
                         ],
-                        dependencies: vec!["ProductRepository".into()],
-                        file_path: None, start_line: None, end_line: None,
-                    },
-                ],
-                repositories: vec![
-                    Repository {
-                        name: "OrderRepository".into(),
-                        aggregate: "Order".into(),
-                        methods: vec![
-                            Method { name: "find_by_id".into(), description: "".into(), return_type: "Option<Order>".into(),
-                                parameters: vec![
-                                    Field { name: "id".into(), field_type: "OrderId".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
-                            Method { name: "save".into(), description: "".into(), return_type: "".into(),
-                                parameters: vec![
-                                    Field { name: "order".into(), field_type: "Order".into(), required: true, description: "".into() },
-                                ], file_path: None, start_line: None, end_line: None },
-                        ],
-                        file_path: None, start_line: None, end_line: None,
-                    },
-                ],
-                events: vec![
-                    DomainEvent {
-                        name: "OrderPlaced".into(),
-                        description: "".into(),
-                        source: "Order".into(),
-                        fields: vec![
-                            Field { name: "order_id".into(), field_type: "OrderId".into(), required: true, description: "".into() },
-                            Field { name: "customer_id".into(), field_type: "CustomerId".into(), required: true, description: "".into() },
-                            Field { name: "total".into(), field_type: "Money".into(), required: true, description: "".into() },
-                        ],
-                        file_path: None, start_line: None, end_line: None,
-                    },
-                ],
+                        file_path: None,
+                        start_line: None,
+                        end_line: None,
+                    }],
+                    dependencies: vec!["ProductRepository".into()],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
+                }],
+                repositories: vec![Repository {
+                    name: "OrderRepository".into(),
+                    aggregate: "Order".into(),
+                    methods: vec![
+                        Method {
+                            name: "find_by_id".into(),
+                            description: "".into(),
+                            return_type: "Option<Order>".into(),
+                            parameters: vec![Field {
+                                name: "id".into(),
+                                field_type: "OrderId".into(),
+                                required: true,
+                                description: "".into(),
+                            }],
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
+                        },
+                        Method {
+                            name: "save".into(),
+                            description: "".into(),
+                            return_type: "".into(),
+                            parameters: vec![Field {
+                                name: "order".into(),
+                                field_type: "Order".into(),
+                                required: true,
+                                description: "".into(),
+                            }],
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
+                        },
+                    ],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
+                }],
+                events: vec![DomainEvent {
+                    name: "OrderPlaced".into(),
+                    description: "".into(),
+                    source: "Order".into(),
+                    fields: vec![
+                        Field {
+                            name: "order_id".into(),
+                            field_type: "OrderId".into(),
+                            required: true,
+                            description: "".into(),
+                        },
+                        Field {
+                            name: "customer_id".into(),
+                            field_type: "CustomerId".into(),
+                            required: true,
+                            description: "".into(),
+                        },
+                        Field {
+                            name: "total".into(),
+                            field_type: "Money".into(),
+                            required: true,
+                            description: "".into(),
+                        },
+                    ],
+                    file_path: None,
+                    start_line: None,
+                    end_line: None,
+                }],
                 modules: vec![],
                 dependencies: vec!["Catalog".into()],
                 api_endpoints: vec![],
@@ -259,12 +518,19 @@ fn ecommerce_model() -> DomainModel {
         external_systems: vec![],
         architectural_decisions: vec![],
         ownership: Ownership::default(),
-        rules: vec![
-            ArchitecturalRule { id: "LAYER-001".into(), description: "Domain must not depend on infra".into(), severity: Severity::Error, scope: "domain".into() },
-        ],
+        rules: vec![ArchitecturalRule {
+            id: "LAYER-001".into(),
+            description: "Domain must not depend on infra".into(),
+            severity: Severity::Error,
+            scope: "domain".into(),
+        }],
         tech_stack: TechStack::default(),
         conventions: Conventions::default(),
         ast_edges: vec![],
+        source_files: vec![],
+        symbols: vec![],
+        import_edges: vec![],
+        call_edges: vec![],
     }
 }
 
@@ -300,8 +566,14 @@ fn type_usage_with_first_class_fields() {
 
     // Verify we can see cross-context results
     let contexts: Vec<&str> = rows.iter().map(|r| r[0].as_str()).collect();
-    assert!(contexts.contains(&"Catalog"), "Should find Money in Catalog");
-    assert!(contexts.contains(&"Ordering"), "Should find Money in Ordering");
+    assert!(
+        contexts.contains(&"Catalog"),
+        "Should find Money in Catalog"
+    );
+    assert!(
+        contexts.contains(&"Ordering"),
+        "Should find Money in Ordering"
+    );
 }
 
 #[test]
@@ -429,7 +701,9 @@ fn invariant_coverage_with_first_class_invariants() {
     store.save_desired(&ws, &ecommerce_model()).unwrap();
     let canonical = dendrites::store::cozo::canonicalize_path(&ws);
 
-    let missing = store.aggregate_roots_without_invariants(&canonical).unwrap();
+    let missing = store
+        .aggregate_roots_without_invariants(&canonical)
+        .unwrap();
     // Category is aggregate_root=true but has NO invariants → should be flagged
     assert_eq!(missing.len(), 1, "Expected 1 missing: {:?}", missing);
     assert_eq!(missing[0].1, "Category");
@@ -516,10 +790,7 @@ fn field_level_diff_without_first_class_fields() {
     let changes = diff["pending_changes"].as_array().unwrap();
 
     // Entity-level changes: none (Product still exists in both states)
-    let entity_changes: Vec<_> = changes
-        .iter()
-        .filter(|c| c["kind"] == "entity")
-        .collect();
+    let entity_changes: Vec<_> = changes.iter().filter(|c| c["kind"] == "entity").collect();
     assert!(
         entity_changes.is_empty(),
         "Entity-level diff cannot see field changes: {:?}",
@@ -527,11 +798,11 @@ fn field_level_diff_without_first_class_fields() {
     );
 
     // But field-level picks it up (WITH first-class relations, the diff IS detected)
-    let field_changes: Vec<_> = changes
-        .iter()
-        .filter(|c| c["kind"] == "field")
-        .collect();
-    assert!(!field_changes.is_empty(), "Field-level diff detects the change");
+    let field_changes: Vec<_> = changes.iter().filter(|c| c["kind"] == "field").collect();
+    assert!(
+        !field_changes.is_empty(),
+        "Field-level diff detects the change"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -546,20 +817,22 @@ fn method_level_diff_with_first_class_methods() {
     store.accept(&ws).unwrap();
 
     let mut modified = ecommerce_model();
-    modified.bounded_contexts[0].services[0].methods.push(Method {
-        name: "search_products".into(),
-        description: "Full-text search".into(),
-        parameters: vec![Field {
-            name: "query".into(),
-            field_type: "String".into(),
-            required: true,
-            description: "".into(),
-        }],
-        return_type: "Vec<Product>".into(),
-        file_path: None,
-        start_line: None,
-        end_line: None,
-    });
+    modified.bounded_contexts[0].services[0]
+        .methods
+        .push(Method {
+            name: "search_products".into(),
+            description: "Full-text search".into(),
+            parameters: vec![Field {
+                name: "query".into(),
+                field_type: "String".into(),
+                required: true,
+                description: "".into(),
+            }],
+            return_type: "Vec<Product>".into(),
+            file_path: None,
+            start_line: None,
+            end_line: None,
+        });
     store.save_desired(&ws, &modified).unwrap();
 
     let diff = store.diff_graph(&ws).unwrap();
@@ -716,7 +989,10 @@ fn perf_save_load_diff_cycle() {
     eprintln!("  load_desired : {:>8} µs", load_us);
     eprintln!("  accept       : {:>8} µs", accept_us);
     eprintln!("  diff_graph   : {:>8} µs", diff_us);
-    eprintln!("  total        : {:>8} µs", save_us + load_us + accept_us + diff_us);
+    eprintln!(
+        "  total        : {:>8} µs",
+        save_us + load_us + accept_us + diff_us
+    );
     eprintln!("  relations    : field, method, method_param, invariant, vo_rule");
     eprintln!("  diff changes : {}", changes.len());
 }
@@ -738,7 +1014,11 @@ fn perf_scale_10_contexts() {
             let fields: Vec<Field> = (0..5)
                 .map(|k| Field {
                     name: format!("field_{k}"),
-                    field_type: if k == 0 { format!("Ctx{i}Entity{j}Id") } else { "String".into() },
+                    field_type: if k == 0 {
+                        format!("Ctx{i}Entity{j}Id")
+                    } else {
+                        "String".into()
+                    },
                     required: k < 2,
                     description: "".into(),
                 })
@@ -765,7 +1045,11 @@ fn perf_scale_10_contexts() {
                 aggregate_root: j == 0,
                 fields,
                 methods,
-                invariants: if j == 0 { vec!["Must be valid".into()] } else { vec![] },
+                invariants: if j == 0 {
+                    vec!["Must be valid".into()]
+                } else {
+                    vec![]
+                },
                 file_path: None,
                 start_line: None,
                 end_line: None,
@@ -785,7 +1069,11 @@ fn perf_scale_10_contexts() {
             repositories: vec![],
             events: vec![],
             modules: vec![],
-            dependencies: if i > 0 { vec![format!("Context{}", i - 1)] } else { vec![] },
+            dependencies: if i > 0 {
+                vec![format!("Context{}", i - 1)]
+            } else {
+                vec![]
+            },
             api_endpoints: vec![],
         });
     }
@@ -801,6 +1089,10 @@ fn perf_scale_10_contexts() {
         tech_stack: TechStack::default(),
         conventions: Conventions::default(),
         ast_edges: vec![],
+        source_files: vec![],
+        symbols: vec![],
+        import_edges: vec![],
+        call_edges: vec![],
     };
 
     // Total: 10 contexts × 3 entities × (5 fields + 2 methods + 2 params) = 270 sub-structure rows
@@ -820,7 +1112,11 @@ fn perf_scale_10_contexts() {
     assert_eq!(loaded.bounded_contexts.len(), 10);
     for (i, _bc) in loaded.bounded_contexts.iter().enumerate() {
         // Contexts are keyed by name — find by name, not index
-        let ctx = loaded.bounded_contexts.iter().find(|c| c.name == format!("Context{i}")).unwrap();
+        let ctx = loaded
+            .bounded_contexts
+            .iter()
+            .find(|c| c.name == format!("Context{i}"))
+            .unwrap();
         assert_eq!(ctx.entities.len(), 3, "Context{i} entity count");
         for entity in &ctx.entities {
             assert_eq!(entity.fields.len(), 5, "Entity field count in Context{i}");
@@ -849,5 +1145,8 @@ fn perf_scale_10_contexts() {
     eprintln!("  save_desired   : {:>8} µs", save_us);
     eprintln!("  load_desired   : {:>8} µs", load_us);
     eprintln!("  accept         : {:>8} µs", accept_us);
-    eprintln!("  cross-cut query: {:>8} µs  (120 String fields found)", query_us);
+    eprintln!(
+        "  cross-cut query: {:>8} µs  (120 String fields found)",
+        query_us
+    );
 }

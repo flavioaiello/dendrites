@@ -51,9 +51,9 @@ fn build_guidelines_prompt(
     };
 
     let bootstrap = if is_empty {
-        "\n**This project has no domain model yet.** \
-         Analyze the codebase first: identify bounded contexts, entities, services, \
-         and events using `set_model` (changes build the desired model).\n"
+        "\n**This project has no architecture model yet.** \
+         Analyze the codebase first: identify modules, entities, services, \
+         and events using `define` (changes build the planned architecture).\n"
     } else {
         ""
     };
@@ -86,24 +86,24 @@ fn build_guidelines_prompt(
 {bootstrap}
 ### Workflow
 
-Dendrites maintains two models: the **actual** model (reflects implemented code) and the **desired** model (the target state you are refining).
+Dendrites tracks two views: the **current** architecture (what the code actually does) and the **planned** architecture (what you want to build toward).
 
-1. **Before writing code** → call `get_model` (shows actual + desired + pending changes)
-2. **To update the desired model** → call `set_model` with the appropriate `kind` (bounded_context, entity, service, event) — auto-saved, returns file path suggestions and dependency validation
-3. **To run Datalog analysis** → call `review` with analysis type (circular_deps, layer_violations, impact, aggregate_quality, dependency_graph, or custom Datalog)
-4. **To review changes** → call `refactor` to diff actual vs desired → code actions, file paths, priorities, migration notes
-5. **Iterate** steps 2–4 until the desired model is satisfactory
-6. **After implementing** → call `refactor` with `action: "accept"` to promote desired → actual
-7. **To discard changes** → call `refactor` with `action: "reset"` to revert desired → actual
+1. **Understand the codebase** → call `architecture` (shows current + planned + health score + pending changes)
+2. **Define architecture elements** → call `define` with the appropriate `kind` (bounded_context, entity, service, event) — auto-saved, returns file path suggestions
+3. **Analyze impact** → call `impact` with analysis type (circular_deps, layer_violations, transitive_deps, call_graph_callers, etc.)
+4. **Review drift** → call `refactor` to compare current vs planned → code actions, file paths, priorities
+5. **Iterate** steps 2–4 until the planned architecture is satisfactory
+6. **After implementing** → call `refactor` with `action: "accept"` to mark planned as current
+7. **To discard changes** → call `refactor` with `action: "reset"` to revert planned to current
 
-### Self-Improvement Loop
+### Continuous Improvement
 
-To continuously improve the architecture, use the `diagnose` action as the loop orchestrator:
+Use `diagnose` as the improvement loop:
 
-1. **Diagnose** → call `refactor_model` with `action: "diagnose"` — runs the full pipeline (health, invariants, drift, AST edges) and returns prioritized `next_actions`
-2. **Follow next_actions** → implement the highest-priority fix (break cycles, fix layer violations, add invariants, resolve drift)
-3. **Re-scan** → call `scan_model` to update the actual model from source
-4. **Diagnose again** → call `refactor_model` with `action: "diagnose"` — health score should improve
+1. **Diagnose** → call `refactor` with `action: "diagnose"` — runs full analysis and returns prioritized `next_actions`
+2. **Follow next_actions** → implement the highest-priority fix
+3. **Re-scan** → call `sync` to update the current architecture from source
+4. **Diagnose again** → call `refactor` with `action: "diagnose"` — health score should improve
 5. **Iterate** until `status: "healthy"` (score 100)
 {rules_section}
 {health_section}"#
@@ -132,8 +132,8 @@ fn build_health_section(store: &Store, workspace_path: &str) -> String {
 
     let mut sections: Vec<String> = Vec::new();
     sections.push(format!(
-        "### Domain Model Health — Score: {}/100\n\n\
-         _Computed live from the CozoDB knowledge graph via Datalog inference._",
+        "### Architecture Health — Score: {}/100\n\n\
+         _Computed live from the architecture knowledge graph._",
         health.score
     ));
 
@@ -232,9 +232,7 @@ fn build_health_section(store: &Store, workspace_path: &str) -> String {
 
     // If the model is perfectly healthy
     if health.score == 100 {
-        sections.push(
-            "✅ **No issues detected.** The domain model is structurally sound.".into(),
-        );
+        sections.push("✅ **No issues detected.** The domain model is structurally sound.".into());
     }
 
     sections.join("\n\n")
@@ -273,6 +271,10 @@ mod tests {
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
             ast_edges: vec![],
+            source_files: vec![],
+            symbols: vec![],
+            import_edges: vec![],
+            call_edges: vec![],
         }
     }
 
@@ -332,8 +334,8 @@ mod tests {
         let text = match &prompt.messages[0].content {
             ContentBlock::Text { text } => text,
         };
-        assert!(text.contains("`review`"));
-        assert!(text.contains("Datalog"));
+        assert!(text.contains("`impact`"));
+        assert!(text.contains("`architecture`"));
     }
 
     #[test]
@@ -344,7 +346,7 @@ mod tests {
         let text = match &prompt.messages[0].content {
             ContentBlock::Text { text } => text,
         };
-        assert!(text.contains("Domain Model Health"));
+        assert!(text.contains("Architecture Health"));
         assert!(text.contains("Score:"));
     }
 

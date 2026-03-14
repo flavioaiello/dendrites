@@ -5,9 +5,9 @@ use syn::spanned::Spanned;
 use syn::visit::Visit;
 
 use super::model::*;
-use super::scanner::AstScanner;
-use super::rust_syn::RustSynScanner;
 use super::polyglot::TreeSitterScanner;
+use super::rust_syn::RustSynScanner;
+use super::scanner::AstScanner;
 
 // ─── Live Import Extraction ────────────────────────────────────────────────
 
@@ -15,6 +15,17 @@ use super::polyglot::TreeSitterScanner;
 pub struct LiveDependency {
     pub from_file: String,
     pub to_module: String,
+}
+
+/// A function/method call discovered in source code.
+#[derive(Debug, Clone)]
+pub struct CallInfo {
+    /// Fully qualified caller (e.g. "Store::save_desired" or file-level "main")
+    pub caller: String,
+    /// Callee name (e.g. "save_state", "Vec::new")
+    pub callee: String,
+    /// Line number of the call site (1-based)
+    pub line: usize,
 }
 
 struct ImportVisitor {
@@ -28,7 +39,12 @@ impl<'ast> Visit<'ast> for ImportVisitor {
             match tree {
                 syn::UseTree::Path(path) => extract_paths(
                     &path.tree,
-                    &format!("{}{}{}::", prefix, if prefix.is_empty() { "" } else { "::" }, path.ident),
+                    &format!(
+                        "{}{}{}::",
+                        prefix,
+                        if prefix.is_empty() { "" } else { "::" },
+                        path.ident
+                    ),
                 ),
                 syn::UseTree::Name(name) => vec![format!("{}{}", prefix, name.ident)],
                 syn::UseTree::Rename(rename) => vec![format!("{}{}", prefix, rename.ident)],
@@ -47,7 +63,10 @@ impl<'ast> Visit<'ast> for ImportVisitor {
     }
 }
 
-pub fn extract_live_dependencies(file_path: &Path, source_code: &str) -> Result<Vec<LiveDependency>> {
+pub fn extract_live_dependencies(
+    file_path: &Path,
+    source_code: &str,
+) -> Result<Vec<LiveDependency>> {
     let syntax_tree = syn::parse_file(source_code)
         .with_context(|| format!("Failed to parse rust file: {}", file_path.display()))?;
 
@@ -361,7 +380,12 @@ fn scan_file(file_path: &Path, source_code: &str) -> Result<ScanResult> {
     };
     visitor.visit_file(&syntax_tree);
 
-    Ok((visitor.structs, visitor.enums, visitor.methods, visitor.modules))
+    Ok((
+        visitor.structs,
+        visitor.enums,
+        visitor.methods,
+        visitor.modules,
+    ))
 }
 
 /// Scan all supported source files under a directory and collect structs, enums, methods, and modules.
@@ -375,10 +399,7 @@ fn scan_directory(dir: &Path) -> Result<ScanResult> {
         return Ok((all_structs, all_enums, all_methods, all_modules));
     }
 
-    for entry in ignore::WalkBuilder::new(dir)
-        .build()
-        .filter_map(Result::ok)
-    {
+    for entry in ignore::WalkBuilder::new(dir).build().filter_map(Result::ok) {
         let path = entry.path();
         if path.is_file()
             && let Some(scanner) = scanner_for_path(path)
@@ -445,10 +466,7 @@ fn discover_crate_sources(workspace_root: &Path) -> Vec<CrateSource> {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "unknown".into());
-                sources.push(CrateSource {
-                    name,
-                    src_dir: src,
-                });
+                sources.push(CrateSource { name, src_dir: src });
             }
         }
     }
@@ -475,7 +493,12 @@ fn discover_crate_sources(workspace_root: &Path) -> Vec<CrateSource> {
 // ─── Struct & Enum Classification ──────────────────────────────────────────
 
 /// Result type for scanning a source file: (structs, enums, methods, modules).
-pub type ScanResult = (Vec<DiscoveredStruct>, Vec<DiscoveredEnum>, Vec<DiscoveredMethod>, Vec<DiscoveredModule>);
+pub type ScanResult = (
+    Vec<DiscoveredStruct>,
+    Vec<DiscoveredEnum>,
+    Vec<DiscoveredMethod>,
+    Vec<DiscoveredModule>,
+);
 
 /// Classification of a discovered struct based on naming conventions and
 /// structural heuristics. Used when no desired model is available or when a
@@ -494,11 +517,7 @@ enum StructKind {
 /// Priority order:
 /// 1. Suffix-matched naming conventions (strongest signal)
 /// 2. Structural shape (fields vs methods vs both)
-fn classify_struct(
-    name: &str,
-    fields: &[Field],
-    methods: &[DiscoveredMethod],
-) -> StructKind {
+fn classify_struct(name: &str, fields: &[Field], methods: &[DiscoveredMethod]) -> StructKind {
     let upper = name.to_uppercase();
 
     // ── Naming conventions (suffix-based) ──
@@ -585,14 +604,12 @@ pub fn scan_actual_model(
     workspace_root: &Path,
     desired: Option<&DomainModel>,
 ) -> Result<DomainModel> {
-    let project_name = desired
-        .map(|d| d.name.clone())
-        .unwrap_or_else(|| {
-            workspace_root
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Unnamed".into())
-        });
+    let project_name = desired.map(|d| d.name.clone()).unwrap_or_else(|| {
+        workspace_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unnamed".into())
+    });
 
     let mut actual = DomainModel {
         name: project_name,
@@ -605,6 +622,10 @@ pub fn scan_actual_model(
         tech_stack: desired.map_or(TechStack::default(), |d| d.tech_stack.clone()),
         conventions: desired.map_or(Conventions::default(), |d| d.conventions.clone()),
         ast_edges: vec![],
+        source_files: vec![],
+        symbols: vec![],
+        import_edges: vec![],
+        call_edges: vec![],
     };
 
     // 1. Discover all crate source directories
@@ -661,17 +682,77 @@ pub fn scan_actual_model(
         };
 
         // 3. For each discovered context, scan and classify
+        // Collect per-context imports for dependency inference
+        let mut context_imports: Vec<(String, Vec<LiveDependency>)> = Vec::new();
+
         for (ctx_name, scan_dir, module_path) in &module_dirs {
             let (structs, enums, methods, discovered_modules) = scan_directory(scan_dir)?;
 
+            // Extract file-level imports from this context's directory
+            let mut ctx_deps = Vec::new();
+            if scan_dir.exists() {
+                for entry in ignore::WalkBuilder::new(scan_dir)
+                    .build()
+                    .filter_map(Result::ok)
+                {
+                    let path = entry.path();
+                    if path.is_file()
+                        && let Some(scanner) = scanner_for_path(path)
+                        && let Ok(content) = std::fs::read_to_string(path)
+                    {
+                        // Collect source file
+                        let rel_path = path
+                            .strip_prefix(workspace_root)
+                            .unwrap_or(path)
+                            .to_string_lossy()
+                            .to_string();
+                        let lang = match path.extension().and_then(|e| e.to_str()) {
+                            Some("rs") => "rust",
+                            Some("py") => "python",
+                            Some("ts" | "tsx") => "typescript",
+                            Some("go") => "go",
+                            _ => "unknown",
+                        };
+                        actual.source_files.push(SourceFile {
+                            path: rel_path.clone(),
+                            context: ctx_name.clone(),
+                            language: lang.to_string(),
+                        });
+
+                        // Collect imports and import edges
+                        if let Ok(deps) = scanner.extract_live_dependencies(path, &content) {
+                            for dep in &deps {
+                                actual.import_edges.push(ImportEdge {
+                                    from_file: rel_path.clone(),
+                                    to_module: dep.to_module.clone(),
+                                    context: ctx_name.clone(),
+                                });
+                            }
+                            ctx_deps.extend(deps);
+                        }
+
+                        // Collect call edges
+                        if let Ok(file_calls) = scanner.extract_calls(path, &content) {
+                            for ci in file_calls {
+                                actual.call_edges.push(CallEdge {
+                                    caller: ci.caller,
+                                    callee: ci.callee,
+                                    file_path: rel_path.clone(),
+                                    line: ci.line,
+                                    context: ctx_name.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            context_imports.push((ctx_name.clone(), ctx_deps));
+
             // Resolve matching desired bounded context (by name or module_path)
             let desired_bc = desired.and_then(|d| {
-                d.bounded_contexts
-                    .iter()
-                    .find(|bc| {
-                        bc.name.eq_ignore_ascii_case(ctx_name)
-                            || bc.module_path == *module_path
-                    })
+                d.bounded_contexts.iter().find(|bc| {
+                    bc.name.eq_ignore_ascii_case(ctx_name) || bc.module_path == *module_path
+                })
             });
 
             let mut bc = BoundedContext {
@@ -692,14 +773,17 @@ pub fn scan_actual_model(
                     .map(|dm| {
                         let mod_path = format!("{}::{}", ctx_name, dm.name);
                         let desired_mod = desired_bc.and_then(|dbc| {
-                            dbc.modules.iter().find(|m| m.name.eq_ignore_ascii_case(&dm.name))
+                            dbc.modules
+                                .iter()
+                                .find(|m| m.name.eq_ignore_ascii_case(&dm.name))
                         });
                         Module {
                             name: dm.name.clone(),
                             path: mod_path,
                             public: dm.public,
                             file_path: dm.file_path.clone(),
-                            description: desired_mod.map_or(String::new(), |m| m.description.clone()),
+                            description: desired_mod
+                                .map_or(String::new(), |m| m.description.clone()),
                         }
                     })
                     .collect(),
@@ -727,13 +811,29 @@ pub fn scan_actual_model(
 
                 // Check if desired model provides an explicit classification
                 let desired_kind = desired_bc.and_then(|dbc| {
-                    if dbc.entities.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                    if dbc
+                        .entities
+                        .iter()
+                        .any(|e| e.name.eq_ignore_ascii_case(name))
+                    {
                         Some(StructKind::Entity)
-                    } else if dbc.value_objects.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {
+                    } else if dbc
+                        .value_objects
+                        .iter()
+                        .any(|v| v.name.eq_ignore_ascii_case(name))
+                    {
                         Some(StructKind::ValueObject)
-                    } else if dbc.services.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
+                    } else if dbc
+                        .services
+                        .iter()
+                        .any(|s| s.name.eq_ignore_ascii_case(name))
+                    {
                         Some(StructKind::Service)
-                    } else if dbc.repositories.iter().any(|r| r.name.eq_ignore_ascii_case(name)) {
+                    } else if dbc
+                        .repositories
+                        .iter()
+                        .any(|r| r.name.eq_ignore_ascii_case(name))
+                    {
                         Some(StructKind::Repository)
                     } else if dbc.events.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
                         Some(StructKind::Event)
@@ -748,11 +848,15 @@ pub fn scan_actual_model(
 
                 match kind {
                     StructKind::Entity => {
-                        let desired_ent = desired_bc
-                            .and_then(|dbc| dbc.entities.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        let desired_ent = desired_bc.and_then(|dbc| {
+                            dbc.entities
+                                .iter()
+                                .find(|e| e.name.eq_ignore_ascii_case(name))
+                        });
                         bc.entities.push(Entity {
                             name: name.clone(),
-                            description: desired_ent.map_or(String::new(), |e| e.description.clone()),
+                            description: desired_ent
+                                .map_or(String::new(), |e| e.description.clone()),
                             aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
                             fields: discovered.fields.clone(),
                             methods: struct_methods,
@@ -763,24 +867,33 @@ pub fn scan_actual_model(
                         });
                     }
                     StructKind::ValueObject => {
-                        let desired_vo = desired_bc
-                            .and_then(|dbc| dbc.value_objects.iter().find(|v| v.name.eq_ignore_ascii_case(name)));
+                        let desired_vo = desired_bc.and_then(|dbc| {
+                            dbc.value_objects
+                                .iter()
+                                .find(|v| v.name.eq_ignore_ascii_case(name))
+                        });
                         bc.value_objects.push(ValueObject {
                             name: name.clone(),
-                            description: desired_vo.map_or(String::new(), |v| v.description.clone()),
+                            description: desired_vo
+                                .map_or(String::new(), |v| v.description.clone()),
                             fields: discovered.fields.clone(),
-                            validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
+                            validation_rules: desired_vo
+                                .map_or(vec![], |v| v.validation_rules.clone()),
                             file_path: Some(discovered.file_path.clone()),
                             start_line: Some(discovered.start_line),
                             end_line: Some(discovered.end_line),
                         });
                     }
                     StructKind::Service => {
-                        let desired_svc = desired_bc
-                            .and_then(|dbc| dbc.services.iter().find(|s| s.name.eq_ignore_ascii_case(name)));
+                        let desired_svc = desired_bc.and_then(|dbc| {
+                            dbc.services
+                                .iter()
+                                .find(|s| s.name.eq_ignore_ascii_case(name))
+                        });
                         bc.services.push(Service {
                             name: name.clone(),
-                            description: desired_svc.map_or(String::new(), |s| s.description.clone()),
+                            description: desired_svc
+                                .map_or(String::new(), |s| s.description.clone()),
                             kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
                             methods: struct_methods,
                             dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
@@ -790,8 +903,11 @@ pub fn scan_actual_model(
                         });
                     }
                     StructKind::Repository => {
-                        let desired_repo = desired_bc
-                            .and_then(|dbc| dbc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name)));
+                        let desired_repo = desired_bc.and_then(|dbc| {
+                            dbc.repositories
+                                .iter()
+                                .find(|r| r.name.eq_ignore_ascii_case(name))
+                        });
                         bc.repositories.push(Repository {
                             name: name.clone(),
                             aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
@@ -802,11 +918,15 @@ pub fn scan_actual_model(
                         });
                     }
                     StructKind::Event => {
-                        let desired_evt = desired_bc
-                            .and_then(|dbc| dbc.events.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        let desired_evt = desired_bc.and_then(|dbc| {
+                            dbc.events
+                                .iter()
+                                .find(|e| e.name.eq_ignore_ascii_case(name))
+                        });
                         bc.events.push(DomainEvent {
                             name: name.clone(),
-                            description: desired_evt.map_or(String::new(), |e| e.description.clone()),
+                            description: desired_evt
+                                .map_or(String::new(), |e| e.description.clone()),
                             fields: discovered.fields.clone(),
                             source: desired_evt.map_or(String::new(), |e| e.source.clone()),
                             file_path: Some(discovered.file_path.clone()),
@@ -838,11 +958,23 @@ pub fn scan_actual_model(
 
                 // Check desired model for explicit classification
                 let desired_kind = desired_bc.and_then(|dbc| {
-                    if dbc.entities.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
+                    if dbc
+                        .entities
+                        .iter()
+                        .any(|e| e.name.eq_ignore_ascii_case(name))
+                    {
                         Some(StructKind::Entity)
-                    } else if dbc.value_objects.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {
+                    } else if dbc
+                        .value_objects
+                        .iter()
+                        .any(|v| v.name.eq_ignore_ascii_case(name))
+                    {
                         Some(StructKind::ValueObject)
-                    } else if dbc.services.iter().any(|s| s.name.eq_ignore_ascii_case(name)) {
+                    } else if dbc
+                        .services
+                        .iter()
+                        .any(|s| s.name.eq_ignore_ascii_case(name))
+                    {
                         Some(StructKind::Service)
                     } else if dbc.events.iter().any(|e| e.name.eq_ignore_ascii_case(name)) {
                         Some(StructKind::Event)
@@ -855,11 +987,15 @@ pub fn scan_actual_model(
 
                 match kind {
                     StructKind::Entity => {
-                        let desired_ent = desired_bc
-                            .and_then(|dbc| dbc.entities.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        let desired_ent = desired_bc.and_then(|dbc| {
+                            dbc.entities
+                                .iter()
+                                .find(|e| e.name.eq_ignore_ascii_case(name))
+                        });
                         bc.entities.push(Entity {
                             name: name.clone(),
-                            description: desired_ent.map_or(String::new(), |e| e.description.clone()),
+                            description: desired_ent
+                                .map_or(String::new(), |e| e.description.clone()),
                             aggregate_root: desired_ent.is_some_and(|e| e.aggregate_root),
                             fields: discovered.variants.clone(),
                             methods: enum_methods,
@@ -870,24 +1006,33 @@ pub fn scan_actual_model(
                         });
                     }
                     StructKind::ValueObject => {
-                        let desired_vo = desired_bc
-                            .and_then(|dbc| dbc.value_objects.iter().find(|v| v.name.eq_ignore_ascii_case(name)));
+                        let desired_vo = desired_bc.and_then(|dbc| {
+                            dbc.value_objects
+                                .iter()
+                                .find(|v| v.name.eq_ignore_ascii_case(name))
+                        });
                         bc.value_objects.push(ValueObject {
                             name: name.clone(),
-                            description: desired_vo.map_or(String::new(), |v| v.description.clone()),
+                            description: desired_vo
+                                .map_or(String::new(), |v| v.description.clone()),
                             fields: discovered.variants.clone(),
-                            validation_rules: desired_vo.map_or(vec![], |v| v.validation_rules.clone()),
+                            validation_rules: desired_vo
+                                .map_or(vec![], |v| v.validation_rules.clone()),
                             file_path: Some(discovered.file_path.clone()),
                             start_line: Some(discovered.start_line),
                             end_line: Some(discovered.end_line),
                         });
                     }
                     StructKind::Service => {
-                        let desired_svc = desired_bc
-                            .and_then(|dbc| dbc.services.iter().find(|s| s.name.eq_ignore_ascii_case(name)));
+                        let desired_svc = desired_bc.and_then(|dbc| {
+                            dbc.services
+                                .iter()
+                                .find(|s| s.name.eq_ignore_ascii_case(name))
+                        });
                         bc.services.push(Service {
                             name: name.clone(),
-                            description: desired_svc.map_or(String::new(), |s| s.description.clone()),
+                            description: desired_svc
+                                .map_or(String::new(), |s| s.description.clone()),
                             kind: desired_svc.map_or(ServiceKind::Domain, |s| s.kind.clone()),
                             methods: enum_methods,
                             dependencies: desired_svc.map_or(vec![], |s| s.dependencies.clone()),
@@ -897,8 +1042,11 @@ pub fn scan_actual_model(
                         });
                     }
                     StructKind::Repository => {
-                        let desired_repo = desired_bc
-                            .and_then(|dbc| dbc.repositories.iter().find(|r| r.name.eq_ignore_ascii_case(name)));
+                        let desired_repo = desired_bc.and_then(|dbc| {
+                            dbc.repositories
+                                .iter()
+                                .find(|r| r.name.eq_ignore_ascii_case(name))
+                        });
                         bc.repositories.push(Repository {
                             name: name.clone(),
                             aggregate: desired_repo.map_or(String::new(), |r| r.aggregate.clone()),
@@ -909,11 +1057,15 @@ pub fn scan_actual_model(
                         });
                     }
                     StructKind::Event => {
-                        let desired_evt = desired_bc
-                            .and_then(|dbc| dbc.events.iter().find(|e| e.name.eq_ignore_ascii_case(name)));
+                        let desired_evt = desired_bc.and_then(|dbc| {
+                            dbc.events
+                                .iter()
+                                .find(|e| e.name.eq_ignore_ascii_case(name))
+                        });
                         bc.events.push(DomainEvent {
                             name: name.clone(),
-                            description: desired_evt.map_or(String::new(), |e| e.description.clone()),
+                            description: desired_evt
+                                .map_or(String::new(), |e| e.description.clone()),
                             fields: discovered.variants.clone(),
                             source: desired_evt.map_or(String::new(), |e| e.source.clone()),
                             file_path: Some(discovered.file_path.clone()),
@@ -924,29 +1076,211 @@ pub fn scan_actual_model(
                 }
             }
 
+            // Collect symbols from discovered structs, enums, and methods
+            for s in &structs {
+                let rel_path = std::path::Path::new(&s.file_path)
+                    .strip_prefix(workspace_root)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| s.file_path.clone());
+                actual.symbols.push(SymbolDef {
+                    name: s.name.clone(),
+                    kind: "struct".to_string(),
+                    context: ctx_name.clone(),
+                    file_path: rel_path,
+                    start_line: s.start_line,
+                    end_line: s.end_line,
+                    visibility: "public".to_string(),
+                });
+            }
+            for e in &enums {
+                let rel_path = std::path::Path::new(&e.file_path)
+                    .strip_prefix(workspace_root)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| e.file_path.clone());
+                actual.symbols.push(SymbolDef {
+                    name: e.name.clone(),
+                    kind: "enum".to_string(),
+                    context: ctx_name.clone(),
+                    file_path: rel_path,
+                    start_line: e.start_line,
+                    end_line: e.end_line,
+                    visibility: "public".to_string(),
+                });
+            }
+            for m in &methods {
+                let rel_path = std::path::Path::new(&m.file_path)
+                    .strip_prefix(workspace_root)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| m.file_path.clone());
+                actual.symbols.push(SymbolDef {
+                    name: format!("{}::{}", m.owner, m.name),
+                    kind: "method".to_string(),
+                    context: ctx_name.clone(),
+                    file_path: rel_path,
+                    start_line: m.start_line,
+                    end_line: m.end_line,
+                    visibility: "public".to_string(),
+                });
+            }
+
             actual.bounded_contexts.push(bc);
 
             // Harvest AST edges from polyglot structural relationships
             for s in &structs {
                 for ext in &s.extends {
-                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: s.name.clone(), to_node: ext.clone(), edge_type: "extends".into() });
+                    actual.ast_edges.push(crate::domain::model::ASTEdge {
+                        from_node: s.name.clone(),
+                        to_node: ext.clone(),
+                        edge_type: "extends".into(),
+                    });
                 }
                 for imp in &s.implements {
-                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: s.name.clone(), to_node: imp.clone(), edge_type: "implements".into() });
+                    actual.ast_edges.push(crate::domain::model::ASTEdge {
+                        from_node: s.name.clone(),
+                        to_node: imp.clone(),
+                        edge_type: "implements".into(),
+                    });
                 }
                 for dec in &s.decorators {
-                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: s.name.clone(), to_node: dec.clone(), edge_type: "decorators".into() });
+                    actual.ast_edges.push(crate::domain::model::ASTEdge {
+                        from_node: s.name.clone(),
+                        to_node: dec.clone(),
+                        edge_type: "decorators".into(),
+                    });
                 }
             }
             for e in &enums {
                 for ext in &e.extends {
-                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: e.name.clone(), to_node: ext.clone(), edge_type: "extends".into() });
+                    actual.ast_edges.push(crate::domain::model::ASTEdge {
+                        from_node: e.name.clone(),
+                        to_node: ext.clone(),
+                        edge_type: "extends".into(),
+                    });
                 }
                 for imp in &e.implements {
-                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: e.name.clone(), to_node: imp.clone(), edge_type: "implements".into() });
+                    actual.ast_edges.push(crate::domain::model::ASTEdge {
+                        from_node: e.name.clone(),
+                        to_node: imp.clone(),
+                        edge_type: "implements".into(),
+                    });
                 }
                 for dec in &e.decorators {
-                    actual.ast_edges.push(crate::domain::model::ASTEdge { from_node: e.name.clone(), to_node: dec.clone(), edge_type: "decorators".into() });
+                    actual.ast_edges.push(crate::domain::model::ASTEdge {
+                        from_node: e.name.clone(),
+                        to_node: dec.clone(),
+                        edge_type: "decorators".into(),
+                    });
+                }
+            }
+        }
+
+        // ── Infer context dependencies from collected imports ──────────────
+        let all_ctx_names: Vec<String> = actual
+            .bounded_contexts
+            .iter()
+            .map(|bc| bc.name.clone())
+            .collect();
+
+        for (ctx_name, imports) in &context_imports {
+            let mut inferred_deps: Vec<String> = Vec::new();
+            for dep in imports {
+                // Extract the first meaningful module segment from the import path.
+                //
+                // Rust:       `crate::domain::model`        → "domain"
+                // Python:     `domain.model`                 → "domain"
+                // TypeScript: `./domain/model`               → "domain"
+                //             `../domain/model`              → "domain"
+                //             `@scope/domain`                → "domain"
+                // Go:         `github.com/org/repo/domain`   → "domain" (last segment)
+                let raw = &dep.to_module;
+
+                // Rust: strip crate::/super:: prefix, split on ::
+                let first_segment = if let Some(stripped) = raw
+                    .strip_prefix("crate::")
+                    .or_else(|| raw.strip_prefix("super::"))
+                {
+                    stripped.split("::").next().unwrap_or("")
+                }
+                // Go: fully qualified paths like "github.com/org/repo/domain" → last segment
+                else if raw.contains("github.com/")
+                    || raw.contains("golang.org/")
+                    || raw.contains('/') && raw.contains('.') && !raw.starts_with('.')
+                {
+                    raw.rsplit('/').next().unwrap_or("")
+                }
+                // TypeScript: strip ./ or ../ prefix(es), then split on /
+                else if raw.starts_with("./") || raw.starts_with("../") {
+                    let stripped = raw.trim_start_matches("../").trim_start_matches("./");
+                    stripped.split('/').next().unwrap_or("")
+                }
+                // TypeScript scoped packages: @scope/pkg → pkg
+                else if raw.starts_with('@') {
+                    raw.split('/').nth(1).unwrap_or("")
+                }
+                // Python: `domain.model` → "domain"
+                // Rust without crate:: prefix: `domain::model` → "domain"
+                else {
+                    raw.split("::")
+                        .next()
+                        .and_then(|s| s.split('.').next())
+                        .unwrap_or(raw)
+                };
+
+                // Map to a known context name (skip self-references)
+                if !first_segment.is_empty()
+                    && !first_segment.eq_ignore_ascii_case(ctx_name)
+                    && all_ctx_names
+                        .iter()
+                        .any(|c| c.eq_ignore_ascii_case(first_segment))
+                    && !inferred_deps
+                        .iter()
+                        .any(|d| d.eq_ignore_ascii_case(first_segment))
+                {
+                    // Use the canonical context name
+                    if let Some(canonical) = all_ctx_names
+                        .iter()
+                        .find(|c| c.eq_ignore_ascii_case(first_segment))
+                    {
+                        inferred_deps.push(canonical.clone());
+                    }
+                }
+            }
+
+            if !inferred_deps.is_empty() {
+                if let Some(bc) = actual
+                    .bounded_contexts
+                    .iter_mut()
+                    .find(|bc| bc.name == *ctx_name)
+                {
+                    // Merge: keep desired deps, add inferred ones that aren't already present
+                    for dep in inferred_deps {
+                        if !bc.dependencies.iter().any(|d| d.eq_ignore_ascii_case(&dep)) {
+                            bc.dependencies.push(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Infer event sources from entities in the same context ─────────
+        for bc in &mut actual.bounded_contexts {
+            let entity_names: Vec<String> = bc.entities.iter().map(|e| e.name.clone()).collect();
+            for event in &mut bc.events {
+                if event.source.is_empty() {
+                    // Try to match by naming convention: "UserCreatedEvent" → "User"
+                    let event_upper = event.name.to_uppercase();
+                    if let Some(entity) = entity_names.iter().find(|e| {
+                        let prefix = e.to_uppercase();
+                        event_upper.starts_with(&prefix) && event_upper.len() > prefix.len()
+                    }) {
+                        event.source = entity.clone();
+                    } else if entity_names.len() == 1 {
+                        // Single entity in context → likely the source
+                        event.source = entity_names[0].clone();
+                    } else if let Some(root) = bc.entities.iter().find(|e| e.aggregate_root) {
+                        // Fall back to aggregate root
+                        event.source = root.name.clone();
+                    }
                 }
             }
         }
@@ -1146,10 +1480,7 @@ mod tests {
         );
 
         // Event suffix
-        assert_eq!(
-            classify_struct("OrderCreated", &[], &[]),
-            StructKind::Event,
-        );
+        assert_eq!(classify_struct("OrderCreated", &[], &[]), StructKind::Event,);
         assert_eq!(
             classify_struct("UserDeletedEvent", &[], &[]),
             StructKind::Event,
@@ -1253,7 +1584,11 @@ impl InvoiceRepository {
         assert!(bc.value_objects.iter().any(|v| v.name == "Currency"));
 
         // InvoiceRepository: naming convention → Repository
-        assert!(bc.repositories.iter().any(|r| r.name == "InvoiceRepository"));
+        assert!(
+            bc.repositories
+                .iter()
+                .any(|r| r.name == "InvoiceRepository")
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1284,7 +1619,8 @@ impl User {
     pub fn change_email(&self, email: Email) -> Result<()> { todo!() }
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let desired = DomainModel {
             name: "Test".into(),
@@ -1331,6 +1667,10 @@ impl User {
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
             ast_edges: vec![],
+            source_files: vec![],
+            symbols: vec![],
+            import_edges: vec![],
+            call_edges: vec![],
         };
 
         let actual = scan_actual_model(&tmp, Some(&desired)).unwrap();

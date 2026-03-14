@@ -27,10 +27,12 @@ pub fn list_resources(store: &Store, workspace_path: &str) -> Vec<ResourceDefini
     ];
 
     // Add per-context resources from Datalog
-    let contexts = store.run_datalog(
-        "?[name] := *context{workspace: $ws, name, state: 'desired'}",
-        workspace_path,
-    ).unwrap_or_default();
+    let contexts = store
+        .run_datalog(
+            "?[name] := *context{workspace: $ws, name, state: 'desired'}",
+            workspace_path,
+        )
+        .unwrap_or_default();
 
     for row in &contexts {
         let ctx_name = &row[0];
@@ -53,15 +55,24 @@ pub fn read_resource(store: &Store, workspace_path: &str, uri: &str) -> Resource
     let (mime, text) = match uri {
         "dendrites://architecture/overview" => {
             let overview = build_model_overview(store, workspace_path, "desired");
-            ("application/json", serde_json::to_string_pretty(&overview).unwrap_or_default())
+            (
+                "application/json",
+                serde_json::to_string_pretty(&overview).unwrap_or_default(),
+            )
         }
         "dendrites://architecture/rules" => {
             let model = load_model(store, workspace_path);
-            ("application/json", serde_json::to_string(&model.rules).unwrap_or_default())
+            (
+                "application/json",
+                serde_json::to_string(&model.rules).unwrap_or_default(),
+            )
         }
         "dendrites://architecture/conventions" => {
             let model = load_model(store, workspace_path);
-            ("application/json", serde_json::to_string(&model.conventions).unwrap_or_default())
+            (
+                "application/json",
+                serde_json::to_string(&model.conventions).unwrap_or_default(),
+            )
         }
         _ if uri.starts_with("dendrites://context/") => {
             let ctx_name = uri.strip_prefix("dendrites://context/").unwrap_or("");
@@ -81,12 +92,19 @@ pub fn read_resource(store: &Store, workspace_path: &str, uri: &str) -> Resource
 
 /// Load the desired model from store for rules/conventions that aren't yet in Datalog relations.
 fn load_model(store: &Store, workspace_path: &str) -> DomainModel {
-    store.load_desired(workspace_path).ok().flatten()
+    store
+        .load_desired(workspace_path)
+        .ok()
+        .flatten()
         .unwrap_or_else(|| DomainModel::empty(workspace_path))
 }
 
 /// Read a single bounded context from Datalog, assembling its sub-structures.
-fn read_context_from_store(store: &Store, workspace_path: &str, ctx_name: &str) -> (&'static str, String) {
+fn read_context_from_store(
+    store: &Store,
+    workspace_path: &str,
+    ctx_name: &str,
+) -> (&'static str, String) {
     // Check if context exists
     let ctx_rows = store.run_datalog(
         "?[name, description] := *context{workspace: $ws, name, description, state: 'desired'}, \
@@ -112,7 +130,10 @@ fn read_context_from_store(store: &Store, workspace_path: &str, ctx_name: &str) 
 
     // Also check by exact query
     let _ = ctx_rows;
-    ("text/plain", format!("Bounded context '{}' not found", ctx_name))
+    (
+        "text/plain",
+        format!("Bounded context '{}' not found", ctx_name),
+    )
 }
 
 #[cfg(test)]
@@ -126,8 +147,11 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = temp_dir()
-            .join(format!("dendrites_resources_test_{}_{}.db", std::process::id(), id));
+        let path = temp_dir().join(format!(
+            "dendrites_resources_test_{}_{}.db",
+            std::process::id(),
+            id
+        ));
         let store = Store::open(&path).unwrap();
         let ws = "/test/workspace";
 
@@ -158,6 +182,10 @@ mod tests {
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
             ast_edges: vec![],
+            source_files: vec![],
+            symbols: vec![],
+            import_edges: vec![],
+            call_edges: vec![],
         };
         store.save_desired(ws, &model).unwrap();
         (store, ws.to_string())
@@ -169,8 +197,16 @@ mod tests {
         let resources = list_resources(&store, &ws);
         // 3 static + 1 per context
         assert_eq!(resources.len(), 4);
-        assert!(resources.iter().any(|r| r.uri == "dendrites://architecture/overview"));
-        assert!(resources.iter().any(|r| r.uri == "dendrites://context/identity"));
+        assert!(
+            resources
+                .iter()
+                .any(|r| r.uri == "dendrites://architecture/overview")
+        );
+        assert!(
+            resources
+                .iter()
+                .any(|r| r.uri == "dendrites://context/identity")
+        );
     }
 
     #[test]

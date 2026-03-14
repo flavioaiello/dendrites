@@ -11,6 +11,62 @@ pub struct ASTEdge {
     pub edge_type: String,
 }
 
+/// A source file discovered in the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceFile {
+    /// Relative path from workspace root
+    pub path: String,
+    /// Owning bounded context
+    pub context: String,
+    /// Programming language (rust, python, typescript, go)
+    pub language: String,
+}
+
+/// A symbol (struct, enum, function, interface) discovered in the source code.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SymbolDef {
+    /// Canonical name of the symbol (e.g. "Store", "DomainModel")
+    pub name: String,
+    /// Kind: struct, enum, function, interface, class
+    pub kind: String,
+    /// Owning bounded context
+    pub context: String,
+    /// File where the symbol is defined (relative path)
+    pub file_path: String,
+    /// Start line in the file (1-based)
+    pub start_line: usize,
+    /// End line in the file (1-based)
+    pub end_line: usize,
+    /// Visibility: public, private, etc.
+    pub visibility: String,
+}
+
+/// A file-level import edge: from_file imports to_module.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportEdge {
+    /// Source file (relative path)
+    pub from_file: String,
+    /// Target module or symbol path
+    pub to_module: String,
+    /// Owning bounded context of the source file
+    pub context: String,
+}
+
+/// A symbol-level call edge: caller invokes callee.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallEdge {
+    /// Fully qualified caller symbol (e.g. "Store::save_desired")
+    pub caller: String,
+    /// Fully qualified callee symbol (e.g. "Store::save_state")
+    pub callee: String,
+    /// File where the call occurs (relative path)
+    pub file_path: String,
+    /// Line number of the call site (1-based)
+    pub line: usize,
+    /// Owning bounded context
+    pub context: String,
+}
+
 // ─── Top-Level Domain Model ────────────────────────────────────────────────
 
 /// The root of the domain model configuration.
@@ -46,6 +102,18 @@ pub struct DomainModel {
     /// AST structural dependencies (extends, implements, decorators)
     #[serde(default)]
     pub ast_edges: Vec<ASTEdge>,
+    /// Source files discovered in the workspace
+    #[serde(default)]
+    pub source_files: Vec<SourceFile>,
+    /// Symbols (structs, enums, functions) discovered in the workspace
+    #[serde(default)]
+    pub symbols: Vec<SymbolDef>,
+    /// File-level import edges
+    #[serde(default)]
+    pub import_edges: Vec<ImportEdge>,
+    /// Symbol-level call edges (function/method calls)
+    #[serde(default)]
+    pub call_edges: Vec<CallEdge>,
 }
 
 impl DomainModel {
@@ -66,6 +134,10 @@ impl DomainModel {
             tech_stack: TechStack::default(),
             conventions: Conventions::default(),
             ast_edges: vec![],
+            source_files: vec![],
+            symbols: vec![],
+            import_edges: vec![],
+            call_edges: vec![],
         }
     }
 
@@ -87,10 +159,7 @@ impl DomainModel {
             }
             for policy in &bc.policies {
                 if policy.name.is_empty() {
-                    anyhow::bail!(
-                        "Policy in bounded context '{}' must have a name",
-                        bc.name
-                    );
+                    anyhow::bail!("Policy in bounded context '{}' must have a name", bc.name);
                 }
             }
             for read_model in &bc.read_models {
@@ -103,10 +172,7 @@ impl DomainModel {
             }
             for entity in &bc.entities {
                 if entity.name.is_empty() {
-                    anyhow::bail!(
-                        "Entity in bounded context '{}' must have a name",
-                        bc.name
-                    );
+                    anyhow::bail!("Entity in bounded context '{}' must have a name", bc.name);
                 }
             }
         }
@@ -365,8 +431,6 @@ pub struct APIEndpoint {
     #[serde(default)]
     pub description: String,
 }
-
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalSystem {

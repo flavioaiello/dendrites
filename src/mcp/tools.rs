@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::mcp::protocol::*;
 use crate::store::Store;
@@ -7,11 +7,12 @@ use crate::store::Store;
 pub fn list_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
-            name: "get_model".into(),
-            description: "Returns both the desired and actual domain models, including bounded \
-                          contexts, entities, services, events, rules, and conventions. \
-                          Shows pending changes status. \
-                          Use this before writing any new code to understand the system structure."
+            name: "architecture".into(),
+            description: "Show the complete architecture of this codebase: modules, components, \
+                          services, events, and their relationships. Includes a health score \
+                          (0-100) with specific issues like circular dependencies, layer violations, \
+                          and complexity hotspots. \
+                          Call this first to understand any codebase before making changes."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -20,25 +21,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "model_health".into(),
-            description: "Returns a structured health report for the domain model, computed \
-                          via Datalog inference from the CozoDB knowledge graph. Includes: \
-                          overall score (0-100), circular dependencies, layer violations, \
-                          missing invariants on aggregate roots, god contexts (>10 entities+services), \
-                          unsourced events, orphan contexts, and per-context complexity. \
-                          Use this to programmatically branch on model quality."
-                .into(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            }),
-        },
-        ToolDefinition {
-            name: "query_blast_radius".into(),
-            description: "Compute the downstream impact of changing or deleting an entity.\n\
-                          Supports multiple analysis types: transitive_deps, circular_deps, layer_violations, \n\
-                          impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields."
+            name: "impact".into(),
+            description: "Analyze the downstream impact of changing or deleting a component.\n\
+                          Supports: transitive_deps, circular_deps, layer_violations, impact_analysis, \n\
+                          aggregate_quality, dependency_graph, field_usage, method_search, shared_fields, \n\
+                          pagerank, community_detection, betweenness_centrality, degree_centrality, \n\
+                          topological_order, call_graph_callers, call_graph_callees, \n\
+                          call_graph_reachability, call_graph_stats."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -47,12 +36,14 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                         "type": "string",
                         "enum": ["transitive_deps", "circular_deps", "layer_violations", "impact_analysis",
                                  "aggregate_quality", "dependency_graph", "field_usage", "method_search",
-                                 "shared_fields"],
+                                 "shared_fields", "pagerank", "community_detection", "betweenness_centrality",
+                                 "degree_centrality", "topological_order",
+                                 "call_graph_callers", "call_graph_callees", "call_graph_reachability", "call_graph_stats"],
                         "description": "The specific analysis to run"
                     },
-                    "context": { "type": "string", "description": "Bounded context name (required for transitive_deps, impact_analysis)" },
+                    "context": { "type": "string", "description": "Module or component name (required for transitive_deps, impact_analysis)" },
                     "entity": { "type": "string", "description": "Entity name (required for impact_analysis)" },
-
+                    "symbol": { "type": "string", "description": "Symbol name (required for call_graph_callers, call_graph_callees, call_graph_reachability)" },
                     "field_type": { "type": "string", "description": "Field type to search (required for field_usage)" },
                     "method_name": { "type": "string", "description": "Method name to search (required for method_search)" }
                 },
@@ -60,53 +51,56 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "can_delete_symbol".into(),
-            description: "Determine whether a function, method, or entity can be safely deleted under the defined scope.\n\
-                          Evaluates inbound references and ownership to determine if deletion is structurally safe."
+            name: "safe_to_delete".into(),
+            description: "Check whether a function, struct, or component can be safely deleted. \
+                          Evaluates all inbound references — callers, dependents, event consumers — \
+                          and returns a clear yes/no with evidence."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "context": { "type": "string", "description": "Bounded context name" },
-                    "entity": { "type": "string", "description": "Entity or symbol name" }
+                    "context": { "type": "string", "description": "Module or component name" },
+                    "entity": { "type": "string", "description": "Entity or symbol name to check" }
                 },
                 "required": ["context", "entity"]
             }),
         },
         ToolDefinition {
-            name: "check_architectural_invariant".into(),
-            description: "Evaluate curated architectural invariants. Replaces arbitrary queries with strict proofs.\n\
-                          'policy_violations' checks constraints declared via assert_model."
+            name: "check".into(),
+            description: "Check for architectural problems: circular dependencies, layer violations, \
+                          missing business rules on core entities, isolated modules, or policy violations. \
+                          Run without parameters to check everything at once."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "invariant": {
+                    "check_name": {
                         "type": "string",
-                        "enum": ["layer_violations", "circular_deps", "aggregate_quality", "orphan_contexts", "policy_violations"],
-                        "description": "The specific invariant to check"
+                        "enum": ["layer_violations", "circular_deps", "aggregate_quality", "orphan_contexts", "policy_violations", "drift"],
+                        "description": "Specific check to run (default: runs all checks)"
                     }
                 },
-                "required": ["invariant"]
+                "required": []
             }),
         },
         ToolDefinition {
-            name: "query_dependency_path".into(),
-            description: "Return proof paths between two architectural entities (e.g., from one bounded context to another)."
+            name: "how_connected".into(),
+            description: "Show how two modules or components are connected. Returns the dependency \
+                          path(s) between them, proving whether and how they relate."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "from_context": { "type": "string", "description": "Source context" },
-                    "to_context": { "type": "string", "description": "Target context" }
+                    "from": { "type": "string", "description": "Source module or component" },
+                    "to": { "type": "string", "description": "Target module or component" }
                 },
-                "required": ["from_context", "to_context"]
+                "required": ["from", "to"]
             }),
         },
         ToolDefinition {
-            name: "explain_violation".into(),
-            description: "Takes a violation type and returns a detailed, evidence-backed explanation \
-                          with witness paths and supporting facts. Derived from stored facts, not generated freehand."
+            name: "why".into(),
+            description: "Explain why something is flagged as a problem. Returns evidence-backed \
+                          explanations with specific references and remediation suggestions."
                 .into(),
             input_schema: json!({
                 "type": "object",
@@ -114,47 +108,83 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "violation_type": {
                         "type": "string",
                         "enum": ["layer_violations", "circular_deps", "policy_violations", "aggregate_quality", "orphan_contexts"],
-                        "description": "The type of violation to explain"
+                        "description": "The type of problem to explain"
                     }
                 },
                 "required": ["violation_type"]
             }),
         },
         ToolDefinition {
-            name: "diff_models".into(),
-            description: "Compare desired (intended) vs actual (observed) architecture state. \
-                          Returns added/removed entities, changed dependencies, and pending changes."
+            name: "drift".into(),
+            description: "Compare planned architecture vs current implementation. Shows what's been \
+                          added, removed, or changed — and what still needs to be implemented."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},
             }),
         },
+        ToolDefinition {
+            name: "history".into(),
+            description: "View architecture change history. Without timestamps, lists available \
+                          snapshots. With timestamps, compares two points in time to show \
+                          what changed between them."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "state": {
+                        "type": "string",
+                        "enum": ["planned", "current"],
+                        "description": "Which model state to query (default: planned)"
+                    },
+                    "ts_old": {
+                        "type": "integer",
+                        "description": "Older snapshot timestamp (microseconds). Required for comparison."
+                    },
+                    "ts_new": {
+                        "type": "integer",
+                        "description": "Newer snapshot timestamp (microseconds). Omit for latest."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDefinition {
+            name: "search".into(),
+            description: "Search the architecture by keyword. Finds matching modules, components, \
+                          services, events, and decisions across the entire codebase."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search keywords" },
+                    "limit": { "type": "integer", "description": "Max results (default: 20)", "default": 20 }
+                },
+                "required": ["query"]
+            }),
+        },
     ]
 }
 
 /// Dispatches a tool call and returns the result.
-pub fn call_tool(
-    store: &Store,
-    workspace_path: &str,
-    name: &str,
-    args: &Value,
-) -> ToolCallResult {
+pub fn call_tool(store: &Store, workspace_path: &str, name: &str, args: &Value) -> ToolCallResult {
     match name {
-        "get_model" => {
+        "architecture" => {
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
 
-            // Build overview from Datalog relations — no in-memory DomainRegistry
-            let desired_overview = build_model_overview(store, &canonical, "desired");
-            let actual_overview = build_model_overview(store, &canonical, "actual");
+            let planned = build_model_overview(store, &canonical, "desired");
+            let current = build_model_overview(store, &canonical, "actual");
 
-            let has_actual = actual_overview.get("bounded_contexts")
+            let has_current = current
+                .get("bounded_contexts")
                 .and_then(|v| v.as_array())
                 .is_some_and(|a| !a.is_empty());
 
-            // Use pure Datalog diff for sync check
-            let (status, pending_count) = if has_actual {
-                let changes = store.diff_graph(workspace_path).ok()
+            let (status, pending_count) = if has_current {
+                let changes = store
+                    .diff_graph(workspace_path)
+                    .ok()
                     .and_then(|v| v.get("pending_changes").cloned())
                     .and_then(|v| v.as_array().cloned())
                     .unwrap_or_default();
@@ -164,27 +194,25 @@ pub fn call_tool(
                     ("pending_changes", changes.len())
                 }
             } else {
-                ("no_actual", 0)
+                ("no_current", 0)
             };
 
-            let overview = json!({
-                "desired": desired_overview,
-                "actual": if has_actual { actual_overview } else { json!(null) },
+            let mut overview = json!({
+                "planned": planned,
+                "current": if has_current { current } else { json!(null) },
                 "status": status,
                 "pending_change_count": pending_count,
             });
 
+            // Merge health data into architecture response
+            if let Ok(health) = store.model_health(workspace_path) {
+                overview["health"] = serde_json::to_value(&health).unwrap_or(json!(null));
+            }
+
             text_result(serde_json::to_string(&overview).unwrap())
         }
 
-        "model_health" => {
-            match store.model_health(workspace_path) {
-                Ok(health) => text_result(serde_json::to_string(&health).unwrap()),
-                Err(e) => error_result(format!("model_health query failed: {e}")),
-            }
-        }
-
-        "query_blast_radius" => {
+        "impact" => {
             let analysis = args["analysis"].as_str().unwrap_or("");
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
 
@@ -192,76 +220,100 @@ pub fn call_tool(
                 "transitive_deps" => {
                     let context = match args["context"].as_str() {
                         Some(c) => c,
-                        None => return error_result("'context' parameter is required for transitive_deps".into()),
+                        None => {
+                            return error_result(
+                                "'context' parameter is required for transitive_deps".into(),
+                            );
+                        }
                     };
                     match store.transitive_deps(&canonical, context) {
-                        Ok(deps) => text_result(json!({
-                            "analysis": "transitive_deps",
-                            "context": context,
-                            "dependencies": deps,
-                            "count": deps.len(),
-                        }).to_string()),
+                        Ok(deps) => text_result(
+                            json!({
+                                "analysis": "transitive_deps",
+                                "context": context,
+                                "dependencies": deps,
+                                "count": deps.len(),
+                            })
+                            .to_string(),
+                        ),
                         Err(e) => error_result(format!("Transitive deps query failed: {}", e)),
                     }
                 }
-                "circular_deps" => {
-                    match store.circular_deps(&canonical) {
-                        Ok(cycles) => {
-                            let cycle_pairs: Vec<_> = cycles.iter()
-                                .map(|(a, b)| json!({"from": a, "to": b}))
-                                .collect();
-                            text_result(json!({
+                "circular_deps" => match store.circular_deps(&canonical) {
+                    Ok(cycles) => {
+                        let cycle_pairs: Vec<_> = cycles
+                            .iter()
+                            .map(|(a, b)| json!({"from": a, "to": b}))
+                            .collect();
+                        text_result(
+                            json!({
                                 "analysis": "circular_deps",
                                 "cycles": cycle_pairs,
                                 "has_cycles": !cycles.is_empty(),
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Circular deps query failed: {}", e)),
+                            })
+                            .to_string(),
+                        )
                     }
-                }
-                "layer_violations" => {
-                    match store.layer_violations(&canonical) {
-                        Ok(violations) => {
-                            let items: Vec<_> = violations.iter()
-                                .map(|(ctx, svc, dep)| json!({
+                    Err(e) => error_result(format!("Circular deps query failed: {}", e)),
+                },
+                "layer_violations" => match store.layer_violations(&canonical) {
+                    Ok(violations) => {
+                        let items: Vec<_> = violations
+                            .iter()
+                            .map(|(ctx, svc, dep)| {
+                                json!({
                                     "context": ctx,
                                     "domain_service": svc,
                                     "infrastructure_dependency": dep,
-                                }))
-                                .collect();
-                            text_result(json!({
+                                })
+                            })
+                            .collect();
+                        text_result(
+                            json!({
                                 "analysis": "layer_violations",
                                 "violations": items,
                                 "count": violations.len(),
-                            }).to_string())
-                        }
-                        Err(e) => error_result(format!("Layer violations query failed: {}", e)),
+                            })
+                            .to_string(),
+                        )
                     }
-                }
+                    Err(e) => error_result(format!("Layer violations query failed: {}", e)),
+                },
                 "impact_analysis" => {
                     let context = match args["context"].as_str() {
                         Some(c) => c,
-                        None => return error_result("'context' parameter is required for impact_analysis".into()),
+                        None => {
+                            return error_result(
+                                "'context' parameter is required for impact_analysis".into(),
+                            );
+                        }
                     };
                     let entity = match args["entity"].as_str() {
                         Some(e) => e,
-                        None => return error_result("'entity' parameter is required for impact_analysis".into()),
+                        None => {
+                            return error_result(
+                                "'entity' parameter is required for impact_analysis".into(),
+                            );
+                        }
                     };
                     match store.impact_analysis(&canonical, context, entity) {
-                        Ok(result) => text_result(json!({
-                            "analysis": "impact_analysis",
-                            "result": result,
-                        }).to_string()),
+                        Ok(result) => text_result(
+                            json!({
+                                "analysis": "impact_analysis",
+                                "result": result,
+                            })
+                            .to_string(),
+                        ),
                         Err(e) => error_result(format!("Impact analysis query failed: {}", e)),
                     }
                 }
-                "aggregate_quality" => {
-                    match store.aggregate_roots_without_invariants(&canonical) {
-                        Ok(roots) => {
-                            let items: Vec<_> = roots.iter()
-                                .map(|(ctx, ent)| json!({"context": ctx, "entity": ent}))
-                                .collect();
-                            text_result(json!({
+                "aggregate_quality" => match store.aggregate_roots_without_invariants(&canonical) {
+                    Ok(roots) => {
+                        let items: Vec<_> = roots
+                            .iter()
+                            .map(|(ctx, ent)| json!({"context": ctx, "entity": ent}))
+                            .collect();
+                        text_result(json!({
                                 "analysis": "aggregate_quality",
                                 "aggregate_roots_without_invariants": items,
                                 "count": roots.len(),
@@ -271,29 +323,33 @@ pub fn call_tool(
                                     "Consider adding domain invariants to protect these aggregate roots."
                                 },
                             }).to_string())
-                        }
-                        Err(e) => error_result(format!("Aggregate quality query failed: {}", e)),
                     }
-                }
-                "dependency_graph" => {
-                    match store.dependency_graph(&canonical) {
-                        Ok(graph) => text_result(json!({
+                    Err(e) => error_result(format!("Aggregate quality query failed: {}", e)),
+                },
+                "dependency_graph" => match store.dependency_graph(&canonical) {
+                    Ok(graph) => text_result(
+                        json!({
                             "analysis": "dependency_graph",
                             "graph": graph,
-                        }).to_string()),
-                        Err(e) => error_result(format!("Dependency graph query failed: {}", e)),
-                    }
-                }
+                        })
+                        .to_string(),
+                    ),
+                    Err(e) => error_result(format!("Dependency graph query failed: {}", e)),
+                },
                 "field_usage" => {
                     let field_type = match args["field_type"].as_str() {
                         Some(t) => t,
-                        None => return error_result("'field_type' parameter is required for field_usage".into()),
+                        None => {
+                            return error_result(
+                                "'field_type' parameter is required for field_usage".into(),
+                            );
+                        }
                     };
                     match store.run_datalog(
                         &format!(
                             "?[ctx, owner_kind, owner, field_name] := \
                                 *field{{workspace: $ws, context: ctx, owner_kind, owner, \
-                                       name: field_name, field_type: '{}', state: 'desired'}}",
+                                       name: field_name, field_type: '{}', state: 'desired' @ 'NOW'}}",
                             field_type.replace('\''  , "''")
                         ),
                         &canonical,
@@ -316,28 +372,40 @@ pub fn call_tool(
                 "method_search" => {
                     let method_name = match args["method_name"].as_str() {
                         Some(n) => n,
-                        None => return error_result("'method_name' parameter is required for method_search".into()),
+                        None => {
+                            return error_result(
+                                "'method_name' parameter is required for method_search".into(),
+                            );
+                        }
                     };
                     match store.run_datalog(
                         &format!(
                             "?[ctx, owner_kind, owner, return_type] := \
                                 *method{{workspace: $ws, context: ctx, owner_kind, owner, \
-                                        name: '{}', state: 'desired', return_type}}",
+                                        name: '{}', state: 'desired' @ 'NOW', return_type}}",
                             method_name.replace('\'', "''")
                         ),
                         &canonical,
                     ) {
                         Ok(rows) => {
-                            let items: Vec<_> = rows.iter().map(|r| json!({
-                                "context": r[0], "owner_kind": r[1],
-                                "owner": r[2], "return_type": r[3],
-                            })).collect();
-                            text_result(json!({
-                                "analysis": "method_search",
-                                "method_name": method_name,
-                                "matches": items,
-                                "count": items.len(),
-                            }).to_string())
+                            let items: Vec<_> = rows
+                                .iter()
+                                .map(|r| {
+                                    json!({
+                                        "context": r[0], "owner_kind": r[1],
+                                        "owner": r[2], "return_type": r[3],
+                                    })
+                                })
+                                .collect();
+                            text_result(
+                                json!({
+                                    "analysis": "method_search",
+                                    "method_name": method_name,
+                                    "matches": items,
+                                    "count": items.len(),
+                                })
+                                .to_string(),
+                            )
                         }
                         Err(e) => error_result(format!("Method search query failed: {e}")),
                     }
@@ -348,20 +416,25 @@ pub fn call_tool(
                     match store.run_datalog(
                         "entity_field[ctx, owner, name, ft] := \
                             *field{workspace: $ws, context: ctx, owner_kind: 'entity', \
-                                   owner, name, field_type: ft, state: 'desired'} \
+                                   owner, name, field_type: ft, state: 'desired' @ 'NOW'} \
                          event_field[ctx, owner, name, ft] := \
                             *field{workspace: $ws, context: ctx, owner_kind: 'event', \
-                                   owner, name, field_type: ft, state: 'desired'} \
+                                   owner, name, field_type: ft, state: 'desired' @ 'NOW'} \
                          ?[ctx, entity, event, field_name, field_type] := \
                             entity_field[ctx, entity, field_name, field_type], \
                             event_field[ctx, event, field_name, field_type]",
                         &canonical,
                     ) {
                         Ok(rows) => {
-                            let items: Vec<_> = rows.iter().map(|r| json!({
-                                "context": r[0], "entity": r[1],
-                                "event": r[2], "field": r[3], "type": r[4],
-                            })).collect();
+                            let items: Vec<_> = rows
+                                .iter()
+                                .map(|r| {
+                                    json!({
+                                        "context": r[0], "entity": r[1],
+                                        "event": r[2], "field": r[3], "type": r[4],
+                                    })
+                                })
+                                .collect();
                             text_result(json!({
                                 "analysis": "shared_fields",
                                 "shared": items,
@@ -376,11 +449,156 @@ pub fn call_tool(
                         Err(e) => error_result(format!("Shared fields query failed: {e}")),
                     }
                 }
-                _ => error_result(format!("Unknown analysis type: '{}'. Valid types: transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields", analysis)),
+                "pagerank" => match store.pagerank(&canonical) {
+                    Ok(ranked) => {
+                        let items: Vec<_> = ranked
+                            .iter()
+                            .map(|(name, rank)| json!({"context": name, "rank": rank}))
+                            .collect();
+                        text_result(json!({
+                                "analysis": "pagerank",
+                                "ranking": items,
+                                "count": ranked.len(),
+                                "insight": "Higher PageRank indicates more architecturally important contexts (more dependencies flow through them).",
+                            }).to_string())
+                    }
+                    Err(e) => error_result(format!("PageRank query failed: {e}")),
+                },
+                "community_detection" => match store.community_detection(&canonical) {
+                    Ok(communities) => {
+                        let items: Vec<_> = communities
+                            .iter()
+                            .map(|(name, cid)| json!({"context": name, "community": cid}))
+                            .collect();
+                        text_result(json!({
+                                "analysis": "community_detection",
+                                "communities": items,
+                                "count": communities.len(),
+                                "insight": "Contexts in the same community are tightly coupled. Consider aligning bounded context boundaries with community boundaries.",
+                            }).to_string())
+                    }
+                    Err(e) => error_result(format!("Community detection query failed: {e}")),
+                },
+                "betweenness_centrality" => match store.betweenness_centrality(&canonical) {
+                    Ok(ranked) => {
+                        let items: Vec<_> = ranked.iter()
+                                .map(|(name, centrality)| json!({"context": name, "centrality": centrality}))
+                                .collect();
+                        text_result(json!({
+                                "analysis": "betweenness_centrality",
+                                "ranking": items,
+                                "count": ranked.len(),
+                                "insight": "High betweenness centrality indicates bottleneck contexts. Changes here have outsized downstream impact.",
+                            }).to_string())
+                    }
+                    Err(e) => error_result(format!("Betweenness centrality query failed: {e}")),
+                },
+                "degree_centrality" => match store.degree_centrality(&canonical) {
+                    Ok(degrees) => {
+                        let items: Vec<_> = degrees.iter()
+                                .map(|(name, in_d, out_d)| json!({"context": name, "in_degree": in_d, "out_degree": out_d}))
+                                .collect();
+                        text_result(
+                            json!({
+                                "analysis": "degree_centrality",
+                                "degrees": items,
+                                "count": degrees.len(),
+                            })
+                            .to_string(),
+                        )
+                    }
+                    Err(e) => error_result(format!("Degree centrality query failed: {e}")),
+                },
+                "topological_order" => match store.topological_order(&canonical) {
+                    Ok(result) => text_result(
+                        json!({
+                            "analysis": "topological_order",
+                            "result": result,
+                        })
+                        .to_string(),
+                    ),
+                    Err(e) => error_result(format!("Topological order query failed: {e}")),
+                },
+                "call_graph_callers" => {
+                    let symbol = match args["symbol"].as_str() {
+                        Some(s) => s,
+                        None => {
+                            return error_result(
+                                "'symbol' parameter is required for call_graph_callers".into(),
+                            );
+                        }
+                    };
+                    match store.call_graph_callers(&canonical, symbol) {
+                        Ok(result) => text_result(
+                            json!({
+                                "analysis": "call_graph_callers",
+                                "result": result,
+                            })
+                            .to_string(),
+                        ),
+                        Err(e) => error_result(format!("Call graph callers query failed: {e}")),
+                    }
+                }
+                "call_graph_callees" => {
+                    let symbol = match args["symbol"].as_str() {
+                        Some(s) => s,
+                        None => {
+                            return error_result(
+                                "'symbol' parameter is required for call_graph_callees".into(),
+                            );
+                        }
+                    };
+                    match store.call_graph_callees(&canonical, symbol) {
+                        Ok(result) => text_result(
+                            json!({
+                                "analysis": "call_graph_callees",
+                                "result": result,
+                            })
+                            .to_string(),
+                        ),
+                        Err(e) => error_result(format!("Call graph callees query failed: {e}")),
+                    }
+                }
+                "call_graph_reachability" => {
+                    let symbol = match args["symbol"].as_str() {
+                        Some(s) => s,
+                        None => {
+                            return error_result(
+                                "'symbol' parameter is required for call_graph_reachability".into(),
+                            );
+                        }
+                    };
+                    match store.call_graph_reachability(&canonical, symbol) {
+                        Ok(result) => text_result(
+                            json!({
+                                "analysis": "call_graph_reachability",
+                                "result": result,
+                            })
+                            .to_string(),
+                        ),
+                        Err(e) => {
+                            error_result(format!("Call graph reachability query failed: {e}"))
+                        }
+                    }
+                }
+                "call_graph_stats" => match store.call_graph_stats(&canonical) {
+                    Ok(result) => text_result(
+                        json!({
+                            "analysis": "call_graph_stats",
+                            "result": result,
+                        })
+                        .to_string(),
+                    ),
+                    Err(e) => error_result(format!("Call graph stats query failed: {e}")),
+                },
+                _ => error_result(format!(
+                    "Unknown analysis type: '{}'. Valid types: transitive_deps, circular_deps, layer_violations, impact_analysis, aggregate_quality, dependency_graph, field_usage, method_search, shared_fields, pagerank, community_detection, betweenness_centrality, degree_centrality, topological_order, call_graph_callers, call_graph_callees, call_graph_reachability, call_graph_stats",
+                    analysis
+                )),
             }
         }
 
-        "can_delete_symbol" => {
+        "safe_to_delete" => {
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
             let context = match args["context"].as_str() {
                 Some(c) => c,
@@ -406,12 +624,11 @@ pub fn call_tool(
             }
         }
 
-        "check_architectural_invariant" => {
+        "check" => {
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
-            let invariant = match args["invariant"].as_str() {
-                Some(i) => i,
-                None => return error_result("'invariant' parameter is required".into()),
-            };
+            let invariant = args["check_name"].as_str()
+                .or_else(|| args["invariant"].as_str())
+                .unwrap_or("all");
             match invariant {
                 "layer_violations" => {
                     match store.layer_violations(&canonical) {
@@ -520,39 +737,121 @@ pub fn call_tool(
                         Err(e) => error_result(format!("policy_violations check failed: {e}")),
                     }
                 }
-                _ => error_result(format!("Unknown invariant: '{}'. Valid: layer_violations, circular_deps, aggregate_quality, orphan_contexts, policy_violations", invariant)),
+                "drift" => {
+                    match store.diff_graph(&canonical) {
+                        Ok(diff) => {
+                            let changes = diff["pending_changes"]
+                                .as_array()
+                                .cloned()
+                                .unwrap_or_default();
+                            text_result(json!({
+                                "check_name": "drift",
+                                "status": if changes.is_empty() { "true" } else { "false" },
+                                "pending_changes": changes.len(),
+                            }).to_string())
+                        }
+                        Err(e) => error_result(format!("drift check failed: {e}")),
+                    }
+                }
+                "all" | "" => {
+                    // Run all checks and return combined result
+                    let mut results = json!({});
+                    let mut all_pass = true;
+
+                    if let Ok(violations) = store.layer_violations(&canonical) {
+                        if !violations.is_empty() { all_pass = false; }
+                        results["layer_violations"] = json!({
+                            "status": violations.is_empty(),
+                            "count": violations.len(),
+                        });
+                    }
+                    if let Ok(cycles) = store.circular_deps(&canonical) {
+                        if !cycles.is_empty() { all_pass = false; }
+                        results["circular_deps"] = json!({
+                            "status": cycles.is_empty(),
+                            "count": cycles.len(),
+                        });
+                    }
+                    if let Ok(roots) = store.aggregate_roots_without_invariants(&canonical) {
+                        if !roots.is_empty() { all_pass = false; }
+                        results["aggregate_quality"] = json!({
+                            "status": roots.is_empty(),
+                            "count": roots.len(),
+                        });
+                    }
+                    if let Ok(health) = store.model_health(&canonical) {
+                        if !health.orphan_contexts.is_empty() { all_pass = false; }
+                        results["orphan_contexts"] = json!({
+                            "status": health.orphan_contexts.is_empty(),
+                            "count": health.orphan_contexts.len(),
+                        });
+                    }
+                    if let Ok(result) = store.evaluate_policy_violations(&canonical) {
+                        let count = result["count"].as_u64().unwrap_or(0);
+                        if count > 0 { all_pass = false; }
+                        results["policy_violations"] = json!({
+                            "status": count == 0,
+                            "count": count,
+                        });
+                    }
+                    if let Ok(diff) = store.diff_graph(&canonical) {
+                        let changes = diff["pending_changes"]
+                            .as_array()
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        if changes > 0 { all_pass = false; }
+                        results["drift"] = json!({
+                            "status": changes == 0,
+                            "count": changes,
+                        });
+                    }
+
+                    text_result(json!({
+                        "check_name": "all",
+                        "status": if all_pass { "pass" } else { "issues_found" },
+                        "checks": results,
+                    }).to_string())
+                }
+                _ => error_result(format!("Unknown check: '{}'. Valid: layer_violations, circular_deps, aggregate_quality, orphan_contexts, policy_violations, drift, all", invariant)),
             }
         }
 
-        "query_dependency_path" => {
+        "how_connected" => {
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
-            let from = match args["from_context"].as_str() {
+            let from = args["from"].as_str()
+                .or_else(|| args["from_context"].as_str());
+            let from = match from {
                 Some(f) => f,
-                None => return error_result("'from_context' parameter is required".into()),
+                None => return error_result("'from' parameter is required".into()),
             };
-            let to = match args["to_context"].as_str() {
+            let to = args["to"].as_str()
+                .or_else(|| args["to_context"].as_str());
+            let to = match to {
                 Some(t) => t,
-                None => return error_result("'to_context' parameter is required".into()),
+                None => return error_result("'to' parameter is required".into()),
             };
             match store.query_dependency_path(&canonical, from, to) {
-                Ok(paths) => text_result(json!({
-                    "from": from,
-                    "to": to,
-                    "paths": paths,
-                    "reachable": !paths.is_empty(),
-                    "hop_count": paths.len(),
-                    "proof": {
-                        "rule": "transitive reachability via context_dep",
-                        "derived_from": ["context_dep"],
-                        "witness_paths": paths,
-                    },
-                    "provenance": { "source": "datalog", "state": "desired" },
-                }).to_string()),
+                Ok(paths) => text_result(
+                    json!({
+                        "from": from,
+                        "to": to,
+                        "paths": paths,
+                        "reachable": !paths.is_empty(),
+                        "hop_count": paths.len(),
+                        "proof": {
+                            "rule": "transitive reachability via context_dep",
+                            "derived_from": ["context_dep"],
+                            "witness_paths": paths,
+                        },
+                        "provenance": { "source": "datalog", "state": "desired" },
+                    })
+                    .to_string(),
+                ),
                 Err(e) => error_result(format!("query_dependency_path failed: {e}")),
             }
         }
 
-        "explain_violation" => {
+        "why" => {
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
             let violation_type = match args["violation_type"].as_str() {
                 Some(v) => v,
@@ -762,18 +1061,39 @@ pub fn call_tool(
             }
         }
 
-        "diff_models" => {
+        "drift" => {
             let canonical = crate::store::cozo::canonicalize_path(workspace_path);
             match store.diff_graph(&canonical) {
                 Ok(diff) => {
-                    let changes = diff["pending_changes"].as_array().cloned().unwrap_or_default();
+                    let changes = diff["pending_changes"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
 
-                    let added: Vec<_> = changes.iter()
+                    let added: Vec<_> = changes
+                        .iter()
                         .filter(|c| c["action"].as_str() == Some("add"))
-                        .cloned().collect();
-                    let removed: Vec<_> = changes.iter()
+                        .cloned()
+                        .collect();
+                    let removed: Vec<_> = changes
+                        .iter()
                         .filter(|c| c["action"].as_str() == Some("remove"))
-                        .cloned().collect();
+                        .cloned()
+                        .collect();
+
+                    // Include persisted drift data
+                    let drift_entries: Vec<Value> = store
+                        .load_drift(workspace_path)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(cat, ctx, name, ct)| {
+                            let mut e = json!({"category": cat, "name": name, "change_type": ct});
+                            if !ctx.is_empty() {
+                                e["context"] = json!(ctx);
+                            }
+                            e
+                        })
+                        .collect();
 
                     text_result(json!({
                         "status": if changes.is_empty() { "in_sync" } else { "pending_changes" },
@@ -781,12 +1101,66 @@ pub fn call_tool(
                             "total_changes": changes.len(),
                             "additions": added.len(),
                             "removals": removed.len(),
+                            "drift_entries": drift_entries.len(),
                         },
                         "added": added,
                         "removed": removed,
+                        "drift": drift_entries,
                     }).to_string())
                 }
                 Err(e) => error_result(format!("diff_models failed: {e}")),
+            }
+        }
+
+        "history" => {
+            // Map user-facing state names to internal values
+            let raw_state = args["state"].as_str().unwrap_or("planned");
+            let state = match raw_state {
+                "planned" => "desired",
+                "current" => "actual",
+                other => other,
+            };
+
+            let has_timestamps = args["ts_old"].is_number() || args["ts_new"].is_number();
+
+            if has_timestamps {
+                // Compare two snapshots
+                let ts_old = args["ts_old"].as_i64().unwrap_or(0);
+                let ts_new = args["ts_new"].as_i64().unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_micros() as i64)
+                        .unwrap_or(0)
+                });
+                match store.diff_snapshots(workspace_path, state, ts_old, ts_new) {
+                    Ok(result) => text_result(result.to_string()),
+                    Err(e) => error_result(format!("history comparison failed: {e}")),
+                }
+            } else {
+                // List available snapshots
+                match store.list_snapshots(workspace_path, state) {
+                    Ok(timestamps) => text_result(
+                        json!({
+                            "state": raw_state,
+                            "snapshots": timestamps,
+                            "count": timestamps.len(),
+                        })
+                        .to_string(),
+                    ),
+                    Err(e) => error_result(format!("history listing failed: {e}")),
+                }
+            }
+        }
+
+        "search" => {
+            let query = match args["query"].as_str() {
+                Some(q) => q,
+                None => return error_result("'query' parameter is required".into()),
+            };
+            let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+            match store.search_text(workspace_path, query, limit) {
+                Ok(results) => text_result(results.to_string()),
+                Err(e) => error_result(format!("search_architecture failed: {e}")),
             }
         }
 
@@ -830,75 +1204,91 @@ pub fn build_model_overview(store: &Store, workspace: &str, state: &str) -> Valu
     };
 
     // Query all contexts
-    let contexts = store.run_datalog(
-        &format!("?[name, description, module_path] := \
-            *context{{workspace: $ws, name, description, module_path, state: '{state}'}}"),
-        workspace,
-    ).unwrap_or_default();
+    let contexts = store
+        .run_datalog(
+            &format!(
+                "?[name, description, module_path] := \
+            *context{{workspace: $ws, name, description, module_path, state: '{state}' @ 'NOW'}}"
+            ),
+            workspace,
+        )
+        .unwrap_or_default();
 
-    let context_deps = store.run_datalog(
-        &format!("?[from_ctx, to_ctx] := \
-            *context_dep{{workspace: $ws, from_ctx, to_ctx, state: '{state}'}}"),
-        workspace,
-    ).unwrap_or_default();
+    let context_deps = store
+        .run_datalog(
+            &format!(
+                "?[from_ctx, to_ctx] := \
+            *context_dep{{workspace: $ws, from_ctx, to_ctx, state: '{state}' @ 'NOW'}}"
+            ),
+            workspace,
+        )
+        .unwrap_or_default();
 
     let entities = store.run_datalog(
         &format!("?[ctx, name, description, aggregate_root] := \
-            *entity{{workspace: $ws, context: ctx, name, description, aggregate_root, state: '{state}'}}"),
+            *entity{{workspace: $ws, context: ctx, name, description, aggregate_root, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
     let services = store.run_datalog(
         &format!("?[ctx, name, description, kind] := \
-            *service{{workspace: $ws, context: ctx, name, description, kind, state: '{state}'}}"),
+            *service{{workspace: $ws, context: ctx, name, description, kind, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
     let events = store.run_datalog(
         &format!("?[ctx, name, description, source] := \
-            *event{{workspace: $ws, context: ctx, name, description, source, state: '{state}'}}"),
+            *event{{workspace: $ws, context: ctx, name, description, source, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
     let value_objects = store.run_datalog(
         &format!("?[ctx, name, description] := \
-            *value_object{{workspace: $ws, context: ctx, name, description, state: '{state}'}}"),
+            *value_object{{workspace: $ws, context: ctx, name, description, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
-    let repositories = store.run_datalog(
-        &format!("?[ctx, name, aggregate] := \
-            *repository{{workspace: $ws, context: ctx, name, aggregate, state: '{state}'}}"),
-        workspace,
-    ).unwrap_or_default();
+    let repositories = store
+        .run_datalog(
+            &format!(
+                "?[ctx, name, aggregate] := \
+            *repository{{workspace: $ws, context: ctx, name, aggregate, state: '{state}' @ 'NOW'}}"
+            ),
+            workspace,
+        )
+        .unwrap_or_default();
 
     let fields = store.run_datalog(
         &format!("?[ctx, owner_kind, owner, name, field_type, required] := \
-            *field{{workspace: $ws, context: ctx, owner_kind, owner, name, field_type, required, state: '{state}'}}"),
+            *field{{workspace: $ws, context: ctx, owner_kind, owner, name, field_type, required, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
     let methods = store.run_datalog(
         &format!("?[ctx, owner_kind, owner, name, description, return_type] := \
-            *method{{workspace: $ws, context: ctx, owner_kind, owner, name, description, return_type, state: '{state}'}}"),
+            *method{{workspace: $ws, context: ctx, owner_kind, owner, name, description, return_type, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
     let method_params = store.run_datalog(
         &format!("?[ctx, owner_kind, owner, method, name, param_type, required] := \
-            *method_param{{workspace: $ws, context: ctx, owner_kind, owner, method, name, param_type, required, state: '{state}'}}"),
+            *method_param{{workspace: $ws, context: ctx, owner_kind, owner, method, name, param_type, required, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
-    let invariants = store.run_datalog(
-        &format!("?[ctx, entity, text] := \
-            *invariant{{workspace: $ws, context: ctx, entity, text, state: '{state}'}}"),
-        workspace,
-    ).unwrap_or_default();
+    let invariants = store
+        .run_datalog(
+            &format!(
+                "?[ctx, entity, text] := \
+            *invariant{{workspace: $ws, context: ctx, entity, text, state: '{state}' @ 'NOW'}}"
+            ),
+            workspace,
+        )
+        .unwrap_or_default();
 
     let vo_rules = store.run_datalog(
         &format!("?[ctx, vo, text] := \
-            *vo_rule{{workspace: $ws, context: ctx, value_object: vo, text, state: '{state}'}}"),
+            *vo_rule{{workspace: $ws, context: ctx, value_object: vo, text, state: '{state}' @ 'NOW'}}"),
         workspace,
     ).unwrap_or_default();
 
@@ -1029,8 +1419,11 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = temp_dir()
-            .join(format!("dendrites_tools_test_{}_{}.db", std::process::id(), id));
+        let path = temp_dir().join(format!(
+            "dendrites_tools_test_{}_{}.db",
+            std::process::id(),
+            id
+        ));
         Store::open(&path).unwrap()
     }
 
@@ -1044,54 +1437,70 @@ mod tests {
     #[test]
     fn test_list_tools_count() {
         let tools = list_tools();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
     }
 
     #[test]
-    fn test_can_delete_symbol_dispatch() {
+    fn test_safe_to_delete_dispatch() {
         let store = test_store();
         let ws = format!("/tmp/test-can-del-{}", std::process::id());
-        store.save_desired(&ws, &DomainModel {
-            name: "P".into(),
-            description: "".into(),
-            bounded_contexts: vec![BoundedContext {
-                name: "Sales".into(),
-                description: "".into(),
-                module_path: "src/sales".into(),
-                ownership: Ownership::default(),
-                aggregates: vec![],
-                policies: vec![],
-                read_models: vec![],
-                entities: vec![Entity {
-                    name: "Order".into(),
+        store
+            .save_desired(
+                &ws,
+                &DomainModel {
+                    name: "P".into(),
                     description: "".into(),
-                    aggregate_root: true,
-                    fields: vec![],
-                    methods: vec![],
-                    invariants: vec![],
-                    file_path: None, start_line: None, end_line: None,
-                }],
-                value_objects: vec![],
-                services: vec![],
-                repositories: vec![],
-                events: vec![],
-                modules: vec![],
-                dependencies: vec![],
-                api_endpoints: vec![],
-            }],
-            external_systems: vec![],
-            architectural_decisions: vec![],
-            ownership: Ownership::default(),
-            rules: vec![],
-            tech_stack: TechStack::default(),
-            conventions: Conventions::default(),
-            ast_edges: vec![],
-        }).unwrap();
+                    bounded_contexts: vec![BoundedContext {
+                        name: "Sales".into(),
+                        description: "".into(),
+                        module_path: "src/sales".into(),
+                        ownership: Ownership::default(),
+                        aggregates: vec![],
+                        policies: vec![],
+                        read_models: vec![],
+                        entities: vec![Entity {
+                            name: "Order".into(),
+                            description: "".into(),
+                            aggregate_root: true,
+                            fields: vec![],
+                            methods: vec![],
+                            invariants: vec![],
+                            file_path: None,
+                            start_line: None,
+                            end_line: None,
+                        }],
+                        value_objects: vec![],
+                        services: vec![],
+                        repositories: vec![],
+                        events: vec![],
+                        modules: vec![],
+                        dependencies: vec![],
+                        api_endpoints: vec![],
+                    }],
+                    external_systems: vec![],
+                    architectural_decisions: vec![],
+                    ownership: Ownership::default(),
+                    rules: vec![],
+                    tech_stack: TechStack::default(),
+                    conventions: Conventions::default(),
+                    ast_edges: vec![],
+                    source_files: vec![],
+                    symbols: vec![],
+                    import_edges: vec![],
+                    call_edges: vec![],
+                },
+            )
+            .unwrap();
 
-        let result = call_tool(&store, &ws, "can_delete_symbol", &json!({
-            "context": "Sales",
-            "entity": "Order"
-        }));
+        let result = call_tool(
+            &store,
+            &ws,
+            "safe_to_delete",
+            &json!({
+                "context": "Sales",
+                "entity": "Order"
+            }),
+        );
         assert_eq!(result.is_error, None);
         let ContentBlock::Text { text } = &result.content[0];
         let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -1100,13 +1509,18 @@ mod tests {
     }
 
     #[test]
-    fn test_check_architectural_invariant_dispatch() {
+    fn test_check_dispatch() {
         let store = test_store();
         let ws = format!("/tmp/test-invariant-{}", std::process::id());
         // No data = no violations
-        let result = call_tool(&store, &ws, "check_architectural_invariant", &json!({
-            "invariant": "circular_deps"
-        }));
+        let result = call_tool(
+            &store,
+            &ws,
+            "check",
+            &json!({
+                "check_name": "circular_deps"
+            }),
+        );
         assert_eq!(result.is_error, None);
         let ContentBlock::Text { text } = &result.content[0];
         let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -1115,52 +1529,89 @@ mod tests {
     }
 
     #[test]
-    fn test_check_architectural_invariant_unknown() {
+    fn test_check_unknown() {
         let store = test_store();
-        let result = call_tool(&store, "/tmp/test", "check_architectural_invariant", &json!({
-            "invariant": "nonexistent"
-        }));
+        let result = call_tool(
+            &store,
+            "/tmp/test",
+            "check",
+            &json!({
+                "check_name": "nonexistent"
+            }),
+        );
         assert_eq!(result.is_error, Some(true));
     }
 
     #[test]
-    fn test_query_dependency_path_dispatch() {
+    fn test_how_connected_dispatch() {
         let store = test_store();
         let ws = format!("/tmp/test-deppath-{}", std::process::id());
-        store.save_desired(&ws, &DomainModel {
-            name: "P".into(),
-            description: "".into(),
-            bounded_contexts: vec![
-                BoundedContext {
-                    name: "A".into(), description: "".into(), module_path: "src/a".into(),
-                    ownership: Ownership::default(), aggregates: vec![], policies: vec![],
-                    read_models: vec![], entities: vec![], value_objects: vec![],
-                    services: vec![], repositories: vec![], events: vec![],
-                    modules: vec![],
-                    dependencies: vec!["B".into()], api_endpoints: vec![],
+        store
+            .save_desired(
+                &ws,
+                &DomainModel {
+                    name: "P".into(),
+                    description: "".into(),
+                    bounded_contexts: vec![
+                        BoundedContext {
+                            name: "A".into(),
+                            description: "".into(),
+                            module_path: "src/a".into(),
+                            ownership: Ownership::default(),
+                            aggregates: vec![],
+                            policies: vec![],
+                            read_models: vec![],
+                            entities: vec![],
+                            value_objects: vec![],
+                            services: vec![],
+                            repositories: vec![],
+                            events: vec![],
+                            modules: vec![],
+                            dependencies: vec!["B".into()],
+                            api_endpoints: vec![],
+                        },
+                        BoundedContext {
+                            name: "B".into(),
+                            description: "".into(),
+                            module_path: "src/b".into(),
+                            ownership: Ownership::default(),
+                            aggregates: vec![],
+                            policies: vec![],
+                            read_models: vec![],
+                            entities: vec![],
+                            value_objects: vec![],
+                            services: vec![],
+                            repositories: vec![],
+                            events: vec![],
+                            modules: vec![],
+                            dependencies: vec![],
+                            api_endpoints: vec![],
+                        },
+                    ],
+                    external_systems: vec![],
+                    architectural_decisions: vec![],
+                    ownership: Ownership::default(),
+                    rules: vec![],
+                    tech_stack: TechStack::default(),
+                    conventions: Conventions::default(),
+                    ast_edges: vec![],
+                    source_files: vec![],
+                    symbols: vec![],
+                    import_edges: vec![],
+                    call_edges: vec![],
                 },
-                BoundedContext {
-                    name: "B".into(), description: "".into(), module_path: "src/b".into(),
-                    ownership: Ownership::default(), aggregates: vec![], policies: vec![],
-                    read_models: vec![], entities: vec![], value_objects: vec![],
-                    services: vec![], repositories: vec![], events: vec![],
-                    modules: vec![],
-                    dependencies: vec![], api_endpoints: vec![],
-                },
-            ],
-            external_systems: vec![],
-            architectural_decisions: vec![],
-            ownership: Ownership::default(),
-            rules: vec![],
-            tech_stack: TechStack::default(),
-            conventions: Conventions::default(),
-            ast_edges: vec![],
-        }).unwrap();
+            )
+            .unwrap();
 
-        let result = call_tool(&store, &ws, "query_dependency_path", &json!({
-            "from_context": "A",
-            "to_context": "B"
-        }));
+        let result = call_tool(
+            &store,
+            &ws,
+            "how_connected",
+            &json!({
+                "from": "A",
+                "to": "B"
+            }),
+        );
         assert_eq!(result.is_error, None);
         let ContentBlock::Text { text } = &result.content[0];
         let parsed: serde_json::Value = serde_json::from_str(text).unwrap();

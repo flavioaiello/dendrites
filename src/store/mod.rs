@@ -2,9 +2,9 @@ pub mod cozo;
 
 pub use cozo::Store;
 
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use anyhow::{Context, Result};
 
 // ─── Crate Entry ───────────────────────────────────────────────────────────
 
@@ -48,7 +48,8 @@ pub struct CrateRegistry {
 impl CrateRegistry {
     /// Discover crates in the workspace and open a Store for each.
     pub fn open(workspace_root: &Path) -> Result<Self> {
-        let workspace_root = workspace_root.canonicalize()
+        let workspace_root = workspace_root
+            .canonicalize()
             .unwrap_or_else(|_| workspace_root.to_path_buf());
 
         let crate_roots = discover_crate_roots(&workspace_root);
@@ -62,15 +63,13 @@ impl CrateRegistry {
         let mut crates = Vec::with_capacity(crate_roots.len());
         for (name, root) in crate_roots {
             let db_path = root.join(".dendrites").join("store.db");
-            let store = Arc::new(
-                Store::open(&db_path).with_context(|| {
-                    format!(
-                        "Failed to open store for crate '{}' at {}",
-                        name,
-                        db_path.display()
-                    )
-                })?,
-            );
+            let store = Arc::new(Store::open(&db_path).with_context(|| {
+                format!(
+                    "Failed to open store for crate '{}' at {}",
+                    name,
+                    db_path.display()
+                )
+            })?);
             crates.push(CrateEntry { name, root, store });
         }
 

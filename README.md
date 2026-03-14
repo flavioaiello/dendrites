@@ -177,6 +177,56 @@ Every reasoning tool returns structured results with:
 
 The system never guesses. If it can't prove a claim, it returns `unknown`.
 
+## Example tool outputs
+
+### `model_health`
+
+```json
+{
+  "score": 85,
+  "circular_deps": [],
+  "layer_violations": [],
+  "missing_invariants": [["Catalog", "Category"]],
+  "orphan_contexts": ["Notifications"],
+  "god_contexts": [],
+  "unsourced_events": [],
+  "complexity": [
+    { "context": "Catalog", "entity_count": 3, "service_count": 2, "event_count": 2, "dep_count": 0 },
+    { "context": "Ordering", "entity_count": 2, "service_count": 1, "event_count": 1, "dep_count": 1 }
+  ]
+}
+```
+
+### `can_delete_symbol`
+
+```json
+{
+  "can_delete": false,
+  "aggregates_referencing": [],
+  "events_sourced": ["OrderPlaced", "OrderCancelled"],
+  "repositories_managing": ["OrderRepository"],
+  "import_references": [],
+  "ast_references": [],
+  "call_references": [
+    { "caller": "process_payment", "file": "src/billing/service.rs", "line": 42 }
+  ]
+}
+```
+
+### `diff_models`
+
+```json
+{
+  "status": "diverged",
+  "pending_changes": [
+    { "kind": "context", "action": "add", "context": "", "name": "Notifications" },
+    { "kind": "field", "action": "add", "context": "Catalog", "name": "sku", "owner_kind": "entity", "owner": "Product" },
+    { "kind": "entity", "action": "remove", "context": "Ordering", "name": "LegacyOrder" }
+  ],
+  "pending_change_count": 3
+}
+```
+
 ## Supported languages
 
 | Language | Parser | Coverage |

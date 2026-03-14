@@ -1,9 +1,12 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-use syn::visit::Visit;
 use syn::spanned::Spanned;
+use syn::visit::Visit;
 
-use super::analyze::{DiscoveredEnum, DiscoveredMethod, DiscoveredModule, DiscoveredStruct, LiveDependency, ScanResult};
+use super::analyze::{
+    CallInfo, DiscoveredEnum, DiscoveredMethod, DiscoveredModule, DiscoveredStruct, LiveDependency,
+    ScanResult,
+};
 use super::model::Field;
 use super::scanner::AstScanner;
 
@@ -69,11 +72,7 @@ impl AstScanner for RustSynScanner {
         Ok(deps)
     }
 
-    fn scan_file(
-        &self,
-        file_path: &Path,
-        source_code: &str,
-    ) -> Result<ScanResult> {
+    fn scan_file(&self, file_path: &Path, source_code: &str) -> Result<ScanResult> {
         let syntax_tree = syn::parse_file(source_code)
             .with_context(|| format!("Failed to parse: {}", file_path.display()))?;
 
@@ -101,7 +100,155 @@ impl AstScanner for RustSynScanner {
             }
         }
 
-        Ok((visitor.structs, visitor.enums, visitor.methods, visitor.modules))
+        Ok((
+            visitor.structs,
+            visitor.enums,
+            visitor.methods,
+            visitor.modules,
+        ))
+    }
+
+    fn extract_calls(&self, file_path: &Path, source_code: &str) -> Result<Vec<CallInfo>> {
+        let syntax_tree = syn::parse_file(source_code)
+            .with_context(|| format!("Failed to parse: {}", file_path.display()))?;
+
+        let mut calls = Vec::new();
+        for item in &syntax_tree.items {
+            if let syn::Item::Impl(imp) = item {
+                let owner = type_to_string(&imp.self_ty);
+                // Skip trait impls — they mirror trait definitions
+                if imp.trait_.is_some() {
+                    continue;
+                }
+                for impl_item in &imp.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        let caller = format!("{}::{}", owner, method.sig.ident);
+                        collect_calls_from_block(&method.block, &caller, &mut calls);
+                    }
+                }
+            } else if let syn::Item::Fn(func) = item {
+                let caller = func.sig.ident.to_string();
+                collect_calls_from_block(&func.block, &caller, &mut calls);
+            }
+        }
+
+        Ok(calls)
+    }
+}
+
+/// Recursively walk a block's expressions collecting call sites.
+fn collect_calls_from_block(block: &syn::Block, caller: &str, calls: &mut Vec<CallInfo>) {
+    for stmt in &block.stmts {
+        match stmt {
+            syn::Stmt::Expr(expr, _) => {
+                collect_calls_from_expr(expr, caller, calls);
+            }
+            syn::Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    collect_calls_from_expr(&init.expr, caller, calls);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_calls_from_expr(expr: &syn::Expr, caller: &str, calls: &mut Vec<CallInfo>) {
+    match expr {
+        syn::Expr::Call(call) => {
+            let callee = match call.func.as_ref() {
+                syn::Expr::Path(path) => path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+                _ => return,
+            };
+            calls.push(CallInfo {
+                caller: caller.to_string(),
+                callee,
+                line: call.paren_token.span.open().start().line,
+            });
+            for arg in &call.args {
+                collect_calls_from_expr(arg, caller, calls);
+            }
+        }
+        syn::Expr::MethodCall(mc) => {
+            calls.push(CallInfo {
+                caller: caller.to_string(),
+                callee: mc.method.to_string(),
+                line: mc.method.span().start().line,
+            });
+            collect_calls_from_expr(&mc.receiver, caller, calls);
+            for arg in &mc.args {
+                collect_calls_from_expr(arg, caller, calls);
+            }
+        }
+        syn::Expr::Block(b) => collect_calls_from_block(&b.block, caller, calls),
+        syn::Expr::If(i) => {
+            collect_calls_from_expr(&i.cond, caller, calls);
+            collect_calls_from_block(&i.then_branch, caller, calls);
+            if let Some((_, else_branch)) = &i.else_branch {
+                collect_calls_from_expr(else_branch, caller, calls);
+            }
+        }
+        syn::Expr::Match(m) => {
+            collect_calls_from_expr(&m.expr, caller, calls);
+            for arm in &m.arms {
+                collect_calls_from_expr(&arm.body, caller, calls);
+            }
+        }
+        syn::Expr::Closure(c) => {
+            collect_calls_from_expr(&c.body, caller, calls);
+        }
+        syn::Expr::Return(r) => {
+            if let Some(e) = &r.expr {
+                collect_calls_from_expr(e, caller, calls);
+            }
+        }
+        syn::Expr::Try(t) => collect_calls_from_expr(&t.expr, caller, calls),
+        syn::Expr::Paren(p) => collect_calls_from_expr(&p.expr, caller, calls),
+        syn::Expr::Reference(r) => collect_calls_from_expr(&r.expr, caller, calls),
+        syn::Expr::Unary(u) => collect_calls_from_expr(&u.expr, caller, calls),
+        syn::Expr::Binary(b) => {
+            collect_calls_from_expr(&b.left, caller, calls);
+            collect_calls_from_expr(&b.right, caller, calls);
+        }
+        syn::Expr::Let(l) => collect_calls_from_expr(&l.expr, caller, calls),
+        syn::Expr::Tuple(t) => {
+            for e in &t.elems {
+                collect_calls_from_expr(e, caller, calls);
+            }
+        }
+        syn::Expr::Array(a) => {
+            for e in &a.elems {
+                collect_calls_from_expr(e, caller, calls);
+            }
+        }
+        syn::Expr::Field(f) => collect_calls_from_expr(&f.base, caller, calls),
+        syn::Expr::Index(i) => {
+            collect_calls_from_expr(&i.expr, caller, calls);
+            collect_calls_from_expr(&i.index, caller, calls);
+        }
+        syn::Expr::Await(a) => collect_calls_from_expr(&a.base, caller, calls),
+        syn::Expr::Unsafe(u) => collect_calls_from_block(&u.block, caller, calls),
+        syn::Expr::Loop(l) => collect_calls_from_block(&l.body, caller, calls),
+        syn::Expr::While(w) => {
+            collect_calls_from_expr(&w.cond, caller, calls);
+            collect_calls_from_block(&w.body, caller, calls);
+        }
+        syn::Expr::ForLoop(f) => {
+            collect_calls_from_expr(&f.expr, caller, calls);
+            collect_calls_from_block(&f.body, caller, calls);
+        }
+        syn::Expr::Struct(s) => {
+            for field in &s.fields {
+                collect_calls_from_expr(&field.expr, caller, calls);
+            }
+        }
+        _ => {}
     }
 }
 

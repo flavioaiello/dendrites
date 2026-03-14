@@ -4,9 +4,12 @@
 
 You are a senior systems architect and symbolic reasoning engineer responsible for developing, maintaining, and hardening the `dendrites` Domain Model Context Protocol (MCP) Server.
 
-`dendrites` is a **repo-grounded symbolic reasoning engine** for software architecture. Its purpose is to convert software structure into **machine-checkable facts**, evaluate those facts with **formal rules**, and expose the result through a small, verifiable MCP tool surface.
+`dendrites` is a **DDD-grounded symbolic reasoning engine** for software architecture. It maintains a **two-state temporal model** (desired vs actual) backed by CozoDB with Validity time-travel, where:
+- **Desired state** is the intended architecture declared by humans via MCP tools
+- **Actual state** is the observed architecture extracted from source code via polyglot AST scanning
+- **Drift** is computed automatically as the set-difference between desired and actual
 
-You are not building a chatbot. You are building an **architectural ALU**: a logic engine that allows AI coding agents to ask precise questions about software systems and receive **evidence-backed answers**.
+The system exposes 15 MCP tools (11 read + 4 write) that allow AI coding agents to query, mutate, and reason about software architecture with evidence-backed answers derived from Datalog rules over normalized relations.
 
 ---
 
@@ -46,69 +49,45 @@ Every MCP request is a potentially adversarial claim about the codebase until pr
 
 ---
 
-## EPISTEMIC STANDARD
+## TWO-STATE TEMPORAL MODEL
 
-The server MUST distinguish between four classes of knowledge:
+This is the central design pattern. Every domain relation carries:
+- `state: String` — either `'desired'` or `'actual'`
+- `vld: Validity default 'ASSERT'` — CozoDB temporal column enabling time-travel
 
-### 1. Observed Facts
-Facts extracted directly from source code, build metadata, configuration, or repository structure.
+### Desired State
+The intended architecture declared by humans or agents via `set_model`.
+Represents what you want to build to.
 
-Examples:
-- a function calls another function
-- a module imports another module
-- a type is defined in a file
-- a crate depends on another crate
+### Actual State
+The observed architecture extracted from source code via `scan_model`.
+Represents what the code actually does.
 
-Observed facts MUST carry provenance.
+### Drift
+Computed automatically as the set-difference between desired and actual.
+Stored in the `drift` relation. Recomputed after every `save_actual`, `accept`, or file watcher sync.
 
-### 2. Asserted Facts
-Facts declared by humans, policy files, architecture manifests, or admin tools.
+### State Operations
+- `save_desired()` / `load_desired()` — persist/retrieve intended architecture
+- `save_actual()` / `load_actual()` — persist/retrieve observed architecture
+- `accept()` — promote desired → actual (mark refactoring complete)
+- `reset()` — revert desired ← actual (abandon planned changes)
+- `diff_graph()` — compare states, returns added/removed/changed elements
+- `compute_drift()` — recompute desired-vs-actual drift
 
-Examples:
-- module `payments.core` belongs to the `Domain` layer
-- `Domain` MUST NOT depend on `Infrastructure`
-- service `billing-api` owns datastore `ledger-db`
+### CozoDB Validity Time-Travel
 
-Asserted facts MUST carry authorship and source provenance.
+All 33 state-carrying relations use `vld: Validity default 'ASSERT'` as the last key column.
 
-### 3. Derived Facts
-Facts inferred from observed and asserted facts through Datalog rules.
+Key patterns:
+- Read queries use `@ 'NOW'` for point-in-time access (current state)
+- Negation CANNOT be combined with `@ 'NOW'` directly — use intermediate derived rules
+- Retraction: `vld = 'RETRACT'` in rule body (NOT in `<- [[]]` inline data)
+- Non-Validity relations (`project`, `layer_assignment`, `dependency_constraint`, `live_import`) use `:rm` for deletion
+- FTS indices are NOT Validity-aware — filter via join with `@ 'NOW'` on base relation
+- `snapshot_log` records temporal snapshots for time-travel diff queries
 
-Examples:
-- transitive dependency paths
-- blast radius reachability
-- cycle membership
-- policy violations
-- dead functions
-- boundary crossings
-
-Derived facts MUST be reproducible from stored facts and rules.
-
-### 4. Unknown / Unprovable Claims
-Any claim not supported by the fact base and rule system.
-
-Unknown claims MUST NOT be presented as true.
-The system MUST return `unknown`, `insufficient_evidence`, or an equivalent explicit status instead of guessing.
-
----
-
-## AXIOMATIC PURPOSE
-
-The purpose of `dendrites` is to provide a **formal architectural reasoning substrate** over software systems.
-
-The server SHALL:
-- ingest architectural facts
-- normalize them into stable symbolic relations
-- derive higher-order facts using Datalog
-- evaluate invariants and policies
-- return results with proof traces and source evidence
-
-The server SHALL NOT:
-- invent facts not present in the repository or policy layer
-- answer architectural questions without provenance
-- conceal ambiguity
-- silently weaken validation
-- conflate observed structure with intended design
+The system MUST NEVER conflate desired state with actual state.
 
 ---
 
@@ -118,136 +97,101 @@ The server SHALL NOT:
 - a general-purpose natural language chat engine
 - an unbounded theorem prover
 - a replacement for compilers, tests, or type checkers
-- a speculative design assistant that “fills in the blanks”
+- a speculative design assistant that "fills in the blanks"
 - a magical AGI oracle
 
 Its value comes from **bounded symbolic competence**, not theatrical language.
 
 ---
 
-## ONTOLOGY: CANONICAL SOFTWARE ARCHITECTURE MODEL
+## ONTOLOGY: DDD-FIRST ARCHITECTURE MODEL
 
-All architecture reasoning MUST be expressed through explicit relations.
+All architecture reasoning is expressed through explicit CozoDB relations organized around Domain-Driven Design concepts.
 
-### Core Identity Principles
+### Identity Principles
 
-Every entity MUST have:
-- a stable ID
-- a kind
-- a canonical name
-- provenance
-- lifecycle semantics for updates and deletion
+Every entity is identified by composite key: `(workspace, context, name, state, vld)`.
+- `workspace` is the canonical filesystem path to the project root
+- `context` is the bounded context name
+- `name` is the entity name within its context
+- `state` is `'desired'` or `'actual'`
+- `vld` is the CozoDB Validity timestamp
 
-IDs MUST be deterministic where possible. Favor content-derived or canonical-path-derived identities over random UUIDs when stable identity is required across re-indexing.
+IDs are deterministic and content-derived. No random UUIDs.
 
-### Base Entity Relations
+### Domain Entity Relations
 
-At minimum, support these entity relations:
+These relations model the DDD building blocks. All carry `state` + `vld: Validity`.
 
-- `Repository(repo_id, name)`
-- `Package(pkg_id, repo_id, name, ecosystem, version)`
-- `Module(module_id, pkg_id, canonical_name, path)`
-- `File(file_id, module_id, path, language)`
-- `Function(func_id, module_id, canonical_name, visibility, signature)`
-- `Type(type_id, module_id, canonical_name, kind)`
-- `Interface(interface_id, module_id, canonical_name)`
-- `Method(method_id, owner_type_id, canonical_name, visibility, signature)`
-- `Field(field_id, owner_type_id, canonical_name, field_type)`
-- `Layer(layer_id, name)`
-- `BoundedContext(context_id, name)`
-- `Service(service_id, name)`
-- `APIEndpoint(endpoint_id, service_id, method, route_pattern)`
-- `DataStore(store_id, name, kind)`
-- `Event(event_id, name)`
-- `ExternalSystem(ext_id, name, kind)`
+**Core:**
+- `context { workspace, name, state, vld => description, module_path }` — Bounded contexts
+- `context_dep { workspace, from_ctx, to_ctx, state, vld }` — Context dependencies
+- `entity { workspace, context, name, state, vld => description, aggregate_root, file_path, start_line, end_line }` — Domain entities
+- `service { workspace, context, name, state, vld => description, kind, file_path, start_line, end_line }` — Services (domain/application/infrastructure)
+- `event { workspace, context, name, state, vld => description, source, file_path, start_line, end_line }` — Domain events
+- `value_object { workspace, context, name, state, vld => description, file_path, start_line, end_line }` — Value objects
+- `repository { workspace, context, name, state, vld => aggregate, file_path, start_line, end_line }` — Repositories
+- `module { workspace, context, name, state, vld => path, public, file_path, description }` — Modules
+- `policy { workspace, context, name, state, vld => description, kind }` — Domain policies
+- `policy_link { workspace, context, policy, link_kind, link, idx, state, vld }` — Policy linkage
+- `read_model { workspace, context, name, state, vld => description, source }` — CQRS read models
 
-### Structural / Ownership Relations
+**Aggregates:**
+- `aggregate { workspace, context, name, state, vld => description, root_entity }` — Aggregate roots
+- `aggregate_member { workspace, context, aggregate, member_kind, member, state, vld }` — Aggregate membership
 
-- `ContainsModule(pkg_id, module_id)`
-- `ContainsFile(module_id, file_id)`
-- `DefinesFunction(file_id, func_id)`
-- `DefinesType(file_id, type_id)`
-- `DefinesInterface(file_id, interface_id)`
-- `HasMethod(owner_type_id, method_id)`
-- `HasField(owner_type_id, field_id)`
-- `BelongsToLayer(module_id, layer_id)`
-- `BelongsToContext(module_id, context_id)`
-- `OwnedByService(module_id, service_id)`
+**Sub-structures (first-class relations, not JSON blobs):**
+- `field { workspace, context, owner_kind, owner, name, state, vld => field_type, required, description, idx }` — Entity/event/VO fields
+- `method { workspace, context, owner_kind, owner, name, state, vld => description, return_type, idx }` — Entity/service methods
+- `method_param { workspace, context, owner_kind, owner, method, name, state, vld => param_type, required, description, idx }` — Method parameters
+- `invariant { workspace, context, entity, idx, state, vld => text }` — Entity invariants
+- `vo_rule { workspace, context, value_object, idx, state, vld => text }` — Value object validation rules
 
-### Behavioral / Dependency Relations
+**External integration:**
+- `external_system { workspace, name, state, vld => description, kind, rationale }` — External systems
+- `external_system_context { workspace, system, context, idx, state, vld }` — External system ↔ context
+- `api_endpoint { workspace, context, id, state, vld => service_id, method, route_pattern, description }` — API endpoints
+- `invokes_endpoint { workspace, caller_context, caller_method, endpoint_id, state, vld }` — Endpoint invocations
+- `calls_external_system { workspace, caller_context, caller_method, ext_id, state, vld }` — External system calls
+- `architectural_decision { workspace, id, state, vld => title, status, scope, date, rationale }` — ADRs
+- `decision_context { workspace, decision_id, context, idx, state, vld }` — Decision ↔ context
+- `decision_consequence { workspace, decision_id, idx, state, vld => text }` — Decision consequences
+- `owner_meta { workspace, context, owner_kind, owner, state, vld => team, owners_json, rationale }` — Ownership
 
-- `Calls(caller_func_id, callee_func_id)`
-- `MethodCalls(caller_method_id, callee_method_id)`
-- `UsesType(func_id, type_id)`
-- `Instantiates(func_id, type_id)`
-- `Implements(type_id, interface_id)`
-- `ReadsFrom(func_id, store_id)`
-- `WritesTo(func_id, store_id)`
-- `Publishes(func_id, event_id)`
-- `Consumes(func_id, event_id)`
-- `ImportsModule(source_module_id, target_module_id)`
-- `DependsOnPackage(source_pkg_id, target_pkg_id)`
-- `InvokesEndpoint(func_id, endpoint_id)`
-- `CallsExternalSystem(func_id, ext_id)`
+### Source-Level Relations (Actual State)
 
-### Policy / Intent Relations
+These relations capture code-level facts from AST extraction:
 
-- `AllowedLayerDependency(source_layer_id, target_layer_id)`
-- `ForbiddenLayerDependency(source_layer_id, target_layer_id)`
-- `AllowedContextDependency(source_context_id, target_context_id)`
-- `ForbiddenContextDependency(source_context_id, target_context_id)`
-- `PublicAPI(func_id)`
-- `InternalAPI(func_id)`
-- `Deprecated(func_id)`
-- `CriticalFunction(func_id)`
-- `ArchitectureDecision(decision_id, title, status)`
+- `source_file { workspace, path, state, vld => context, language }` — Source files
+- `symbol { workspace, name, state, vld => kind, context, file_path, start_line, end_line, visibility }` — Structs, enums, methods, functions
+- `import_edge { workspace, from_file, to_module, state, vld => context }` — File-level imports
+- `ast_edge { workspace, state, from_node, to_node, edge_type, vld }` — AST structural edges (extends, implements, decorators)
+- `calls_symbol { workspace, caller, callee, state, vld => file_path, line, context }` — Function-level call graph
 
-### Provenance Relations
+### Policy Relations (No Validity)
 
-Every observed or asserted fact MUST be attributable.
+These are workspace-scoped, not temporal:
 
-At minimum:
-- `FactSource(source_id, kind, locator, extractor_version)`
-- `ObservedBy(fact_id, source_id)`
-- `AssertedBy(fact_id, source_id, author)`
-- `SourceSpan(source_id, file_path, start_line, start_col, end_line, end_col)`
-- `ExtractionRun(run_id, repo_id, revision, timestamp, extractor_version)`
+- `layer_assignment { workspace, context => layer }` — Context → layer mapping
+- `dependency_constraint { workspace, constraint_kind, source, target => rule }` — Allowed/forbidden dependencies
 
-If the implementation chooses not to reify every fact as a first-class `fact_id`, it MUST still preserve equivalent provenance in the storage model.
+### Operational Relations
 
----
+- `project { workspace => name, description, updated_at, rules_json, tech_stack_json, conventions_json }` — Project metadata
+- `live_import { workspace, from_file, to_module }` — Ephemeral import tracking (no state/Validity)
+- `drift { workspace, category, context, name, change_type, vld => detail }` — Architecture drift
+- `snapshot_log { workspace, state, timestamp_us => label }` — Temporal snapshot log
 
-## OBSERVED VS INTENDED ARCHITECTURE
+### Indices
 
-This distinction is REQUIRED.
+**19 secondary indices** for efficient Datalog traversal:
+- Reverse-lookup indices on `context_dep`, `service_dep`, `event`, `aggregate_member`, `field`, `method`, `ast_edge`, `context`, `owner_meta`, `external_system_context`, `invokes_endpoint`, `calls_external_system`
+- Source-level indices on `source_file`, `symbol` (by context+kind, by file), `import_edge` (by target, by context), `calls_symbol` (by callee, by context)
 
-### Observed Architecture
-What the code actually does.
-
-Examples:
-- `ImportsModule`
-- `Calls`
-- `ReadsFrom`
-- `WritesTo`
-
-### Intended Architecture
-What the system is supposed to allow.
-
-Examples:
-- `BelongsToLayer`
-- `ForbiddenLayerDependency`
-- `AllowedContextDependency`
-
-### Derived Violations
-Computed mismatches between observed and intended architecture.
-
-Examples:
-- module in `Domain` imports module in `Infrastructure`
-- internal package becomes transitively reachable from public API
-- a supposedly dead function still has inbound references
-- a module participates in a cycle where acyclicity is required
-
-The system MUST NEVER conflate intended architecture with observed architecture.
+**7 FTS indices** for full-text search:
+- `context:fts`, `entity:fts`, `service:fts`, `event:fts`
+- `architectural_decision:title_fts`, `architectural_decision:rationale_fts`
+- `invariant:text_fts`
 
 ---
 
@@ -262,56 +206,69 @@ The implementation SHOULD favor:
 - explicit recursion where necessary
 - deterministic result ordering when returned through MCP
 
-### Required Derived Relations
-
-At minimum, implement rules for:
+### Implemented Derived Relations
 
 #### Reachability
-- transitive module dependency
-- transitive package dependency
-- call graph reachability
-- blast radius closure
+- Transitive context dependency — recursive Datalog over `context_dep`
+- Call graph reachability — recursive Datalog over `calls_symbol`
 
 #### Cycles
-- package dependency cycles
-- module dependency cycles
-- layer violations caused by cycles
+- Context dependency cycles — bidirectional reachability check on `context_dep`
 
 #### Boundary Violations
-- forbidden layer-to-layer dependency
-- forbidden bounded-context dependency
-- private/internal symbol referenced outside allowed scope
+- Layer violations — joins `service.kind`, `layer_assignment`, `context_dep`
+- Policy violations — joins `context_dep`, `layer_assignment`, `dependency_constraint`
 
 #### Dead / Safe-to-Delete Analysis
-- function in-degree
-- method in-degree
-- public API reachability
-- “safe to delete” only when no reachable inbound references exist under defined scope
+- `can_delete_symbol` — checks inbound references across `service_dep`, `context_dep`, `event`, `repository`, `import_edge`, `ast_edge`, `calls_symbol`
 
 #### Change Impact
-- downstream callers
-- downstream modules
-- impacted endpoints
-- impacted services
-- impacted stores/events
+- `impact_analysis` — downstream callers, downstream contexts via transitive deps
+- `call_graph_callers` / `call_graph_callees` — direct call edges
+- `call_graph_reachability` — transitive call closure
+
+#### Graph Analytics
+
+> **Note:** PageRank, CommunityDetectionLouvain, BetweennessCentrality, and TopologicalSort
+> require CozoDB graph algorithm fixed rules. With `cozo-ce` `minimal` feature these are
+> **not available at runtime** and degrade gracefully via `unwrap_or_default()` in `model_health()`.
+> Degree centrality uses a pure Datalog query but has a parse compatibility issue with
+> the current CozoDB alpha. These will become fully functional when CozoDB stabilizes
+> or the `graph-algo` feature is enabled.
+
+- PageRank — CozoDB `PageRank` fixed rule over context dependency graph *(requires graph-algo)*
+- Community detection — CozoDB `CommunityDetectionLouvain` *(requires graph-algo)*
+- Betweenness centrality — CozoDB `BetweennessCentrality` *(requires graph-algo)*
+- Degree centrality — Datalog aggregation over `context_dep` *(parse issue in alpha)*
+- Topological order — CozoDB `TopologicalSort` *(requires graph-algo)*
+
+#### Quality Metrics
+- Aggregate roots without invariants — Datalog negation join
+- Orphan contexts — contexts with no dependencies
+- God contexts — contexts with >10 elements
+- Unsourced events — events with empty source
+- Model health score (0-100) — composite Datalog inference
 
 ### Example Derived Relations
 
-Illustrative only; adapt syntax to actual CozoDB conventions.
+Actual CozoDB syntax used in production:
 
-- `ModuleDependsTransitively(a, b) <- ImportsModule(a, b)`
-- `ModuleDependsTransitively(a, c) <- ImportsModule(a, b), ModuleDependsTransitively(b, c)`
+```
+// Transitive context dependency
+reachable[to] := *context_dep{workspace: $ws, from_ctx: $ctx, to_ctx: to, state: 'desired' @ 'NOW'}
+reachable[to] := reachable[mid], *context_dep{workspace: $ws, from_ctx: mid, to_ctx: to, state: 'desired' @ 'NOW'}
+?[to] := reachable[to]
 
-- `FunctionReachable(a, b) <- Calls(a, b)`
-- `FunctionReachable(a, c) <- Calls(a, b), FunctionReachable(b, c)`
+// Call graph reachability
+reachable[callee] := *calls_symbol{workspace: $ws, caller: $sym, callee, state: 'actual' @ 'NOW'}
+reachable[c] := reachable[b], *calls_symbol{workspace: $ws, caller: b, callee: c, state: 'actual' @ 'NOW'}
+?[callee] := reachable[callee]
 
-- `ModuleCycle(a, b) <- ModuleDependsTransitively(a, b), ModuleDependsTransitively(b, a), a != b`
-
-- `LayerViolation(src_module, dst_module, src_layer, dst_layer) <-`
-  `BelongsToLayer(src_module, src_layer),`
-  `BelongsToLayer(dst_module, dst_layer),`
-  `ImportsModule(src_module, dst_module),`
-  `ForbiddenLayerDependency(src_layer, dst_layer)`
+// Circular dependency detection
+reachable[to] := *context_dep{workspace: $ws, from_ctx: $ctx, to_ctx: to, state: 'desired' @ 'NOW'}
+reachable[to] := reachable[mid], *context_dep{workspace: $ws, from_ctx: mid, to_ctx: to, state: 'desired' @ 'NOW'}
+?[c] := reachable[c], *context_dep{workspace: $ws, from_ctx: c, to_ctx: $ctx, state: 'desired' @ 'NOW'}
+```
 
 The implementation MUST keep actual production rules in versioned, testable form.
 
@@ -319,18 +276,19 @@ The implementation MUST keep actual production rules in versioned, testable form
 
 ## ALU OPERATOR MODEL
 
-The MCP surface represents symbolic architecture operators. Every tool MUST map to one or more explicit operator classes:
+The MCP surface represents symbolic architecture operators. Every tool maps to one or more explicit operator classes:
 
-- **INGEST**: add or update facts
-- **CLASSIFY**: attach entities to architectural categories
-- **PROVE**: answer whether a proposition is true, false, or unknown
-- **TRACE**: return supporting paths or witnesses
-- **DIFF**: compare two revisions or snapshots
-- **IMPACT**: compute transitive consequences of a change
-- **VALIDATE**: evaluate architecture invariants
-- **EXPLAIN**: render proof traces into concise evidence-backed summaries
-
-Do not expose vague tools. Expose operators with clear semantics.
+- **QUERY**: retrieve model state — `get_model`
+- **INGEST**: add or update facts — `set_model`, `scan_model`
+- **CLASSIFY**: attach entities to architectural categories — `assert_model`
+- **PROVE**: answer whether a proposition holds — `check_architectural_invariant`, `can_delete_symbol`
+- **TRACE**: return supporting paths or witnesses — `query_dependency_path`
+- **DIFF**: compare states or snapshots — `diff_models`, `diff_snapshots`
+- **IMPACT**: compute transitive consequences — `query_blast_radius`
+- **VALIDATE**: evaluate architecture invariants — `check_architectural_invariant`, `model_health`
+- **EXPLAIN**: render proof traces into evidence-backed summaries — `explain_violation`
+- **SEARCH**: full-text search across architecture entities — `search_architecture`
+- **LIFECYCLE**: manage refactoring state transitions — `refactor_model`
 
 ---
 
@@ -343,173 +301,136 @@ Every MCP tool MUST have:
 - deterministic failure modes
 - evidence-carrying results
 
-### 1. `ingest_ast_facts`
-Ingest normalized AST-derived facts.
+### Read Tools (11)
 
-**Input MUST include:**
-- repository identity
-- revision / commit SHA
-- extractor version
-- language
-- entities
-- edges
-- source spans
-- upsert mode
+#### 1. `get_model`
+Return the desired and actual models, sync status, and pending change count.
 
-**Behavior:**
-- validate JSON shape at boundary
-- reject malformed entities
-- normalize names and IDs
-- upsert facts atomically
-- associate all observed facts with provenance
+The primary query tool. Returns structured JSON with `desired`, `actual`, `status`, and `pending_change_count`.
 
-**Output MUST include:**
-- counts inserted
-- counts updated
-- counts rejected
-- rejected-reason summary
-- extraction run ID / snapshot ID
+#### 2. `model_health`
+Compute a structured health report via Datalog inference.
 
-### 2. `assert_architecture_policy`
-Persist intended architecture and constraints.
+**Output includes:** score (0-100), circular_deps, layer_violations, god_contexts, orphan_contexts, bottleneck_contexts (betweenness centrality), communities.
 
-Examples:
-- module-to-layer assignments
-- allowed / forbidden layer dependencies
-- context ownership
-- public/internal boundaries
-- critical symbol classification
+#### 3. `query_blast_radius`
+Compute downstream impact using 18 analysis modes:
+- **Dependency**: `transitive_deps`, `circular_deps`, `dependency_graph`, `topological_order`
+- **Violations**: `layer_violations`, `aggregate_quality`
+- **Impact**: `impact_analysis`
+- **Graph analytics**: `pagerank`, `community_detection`, `betweenness_centrality`, `degree_centrality`
+- **Cross-cutting**: `field_usage`, `method_search`, `shared_fields`
+- **Call graph**: `call_graph_callers`, `call_graph_callees`, `call_graph_reachability`, `call_graph_stats`
 
-**Output MUST include persisted policy IDs and validation results.**
+#### 4. `can_delete_symbol`
+Determine whether an entity or symbol can be safely deleted.
 
-### 3. `check_architectural_invariant`
-Evaluate a curated invariant or restricted proposition.
+Checks inbound references across: `service_dep`, `context_dep`, `event`, `repository`, `import_edge`, `ast_edge`, `calls_symbol`.
 
-This tool MUST NOT execute arbitrary user-supplied Datalog unchecked.
+**Output includes:** `can_delete` (bool), witness references grouped by type, `call_references` with caller/file/line.
 
-It SHOULD accept:
-- a named invariant
-- or a restricted declarative proposition in a safe DSL
+#### 5. `check_architectural_invariant`
+Evaluate curated architectural invariants.
 
-Examples:
-- `layer(domain) must_not_depend_on layer(infrastructure)`
-- `context(payments) must_not_depend_on context(identity)`
-- `internal_api must_not_be_reachable_from public_api`
+Accepts named invariants: `layer_violations`, `circular_deps`, `aggregate_quality`, `orphan_contexts`, `policy_violations`.
 
-**Output MUST include:**
-- status: `true | false | unknown`
-- invariant ID / normalized proposition
-- witness paths for violations
-- supporting facts
-- source locations
+Does NOT execute arbitrary user-supplied Datalog.
 
-### 4. `query_dependency_path`
-Return one or more proof paths between two architectural entities.
+**Output includes:** status (`true`/`false`), witness paths, supporting facts.
 
-Examples:
-- module A to module B
-- function X to function Y
-- public API to datastore Z
+#### 6. `query_dependency_path`
+Return proof paths between two bounded contexts.
 
-**Output MUST include explicit path sequences and supporting edges.**
+**Output includes:** explicit path sequences and supporting edges.
 
-### 5. `query_blast_radius`
-Compute downstream impact of changing or deleting an entity.
+#### 7. `explain_violation`
+Explain a violation using proof evidence derived from stored facts and witness paths.
 
-Supported starting entities:
-- function
-- method
-- type
-- module
-- package
-- endpoint
-- event
+Not generated freehand — explanations are Datalog-derived.
 
-**Output MUST include:**
-- impacted entities grouped by type
-- traversal mode used
-- path witnesses
-- truncation metadata if bounded
+#### 8. `diff_models`
+Compare desired vs actual state. Returns added/removed/changed elements with field-level and method-level granularity.
 
-### 6. `can_delete_symbol`
-Determine whether a function, method, or type can be safely deleted under defined scope.
+Also surfaces drift entries when available.
 
-This tool MUST NOT guess.
+#### 9. `diff_snapshots`
+Compare two temporal snapshots by microsecond timestamps.
 
-At minimum:
-- a function is only deletable when there are no inbound references in the selected scope
-- a public API symbol requires stronger checks than a private symbol
-- reflective / dynamic references MUST be reported as uncertainty when not fully modeled
+**Output includes:** added entities, removed entities, changed dependencies.
 
-**Output MUST include:**
-- status: `true | false | unknown`
-- reason code
-- inbound reference count
-- witness references
-- uncertainty notes
+#### 10. `list_snapshots`
+List available temporal snapshots for time-travel queries.
 
-### 7. `explain_violation`
-Take a violation ID or normalized proposition result and explain it using proof evidence.
+#### 11. `search_architecture`
+Full-text search across contexts, entities, services, events, and architectural decisions using CozoDB FTS indices.
 
-The explanation MUST be derived from stored facts and witness paths, not generated freehand.
+### Write Tools (4)
 
-### 8. `diff_architecture_snapshots`
-Compare two revisions.
+#### 1. `set_model`
+Create, update, or remove domain model elements.
 
-**Output MUST include:**
-- added entities
-- removed entities
-- changed dependencies
-- newly introduced violations
-- resolved violations
+Supports: `bounded_context`, `entity`, `service`, `event`, `value_object`, `repository`, `aggregate`, `policy`, `external_system`, `architectural_decision`, `read_model`, `api_endpoint`, `module`.
+
+Actions: `create`, `update`, `remove`.
+
+#### 2. `scan_model`
+AST-scan the workspace to populate the actual model.
+
+Auto-discovers source files, extracts symbols, imports, call edges, and structural relationships. Supports Rust (via `syn`), Python, TypeScript/TSX, and Go (via tree-sitter).
+
+#### 3. `refactor_model`
+Manage the refactoring lifecycle.
+
+Actions:
+- `diagnose` — composite analysis pipeline
+- `plan` — diff desired vs actual, show pending changes
+- `accept` — promote desired → actual
+- `reset` — revert desired ← actual
+
+#### 4. `assert_model`
+Declare architectural constraints and policies.
+
+Actions:
+- `assign_layer` — map context to architectural layer
+- `add_constraint` — add allowed/forbidden dependency constraint
+- `list` — list current assignments and constraints
+- `evaluate` — evaluate all policy violations
 
 ---
 
 ## TOOL OUTPUT CONTRACT
 
-For all reasoning tools, return structured results with this shape conceptually:
+All reasoning tools return structured JSON results.
 
-- `status`
-- `query` or `proposition`
-- `result`
-- `proof`
-- `evidence`
-- `provenance`
-- `limitations`
-- `errors`
-
-### Proof Requirements
-
-A proof SHOULD include:
-- the derived rule or operator used
-- the witness path(s)
-- the base facts supporting the result
-- source files / spans where available
-- snapshot / revision identity
-
-### Uncertainty Requirements
-
-If the model cannot prove a claim because of:
-- dynamic dispatch not yet modeled
-- reflection
-- code generation
-- unresolved imports
-- partial ingestion
-- unsupported language features
-
-the system MUST return `unknown` or equivalent with explicit limitations.
+Results SHOULD include where applicable:
+- `status` — outcome indicator
+- `result` — the primary data
+- `proof` — derived rule or operator used, with witness paths
+- `evidence` — supporting facts and source locations
+- `limitations` — known gaps (dynamic dispatch, reflection, partial ingestion)
 
 ---
 
-## REPOSITORY SNAPSHOTS AND TEMPORAL CONSISTENCY
+## POLYGLOT AST SCANNING
 
-Architecture reasoning is snapshot-relative.
+The `AstScanner` trait provides language-agnostic AST extraction:
 
-All facts MUST be associated with a repository snapshot or extraction run.
+- `extract_live_dependencies(path, source)` — module-level imports
+- `scan_file(path, source)` — symbols (structs, enums, methods)
+- `extract_calls(path, source)` — function-level call graph edges
 
-The server MUST NOT mix facts from different revisions in a single proof unless explicitly requested by a diff tool.
+### Implementations
 
-All mutation operations affecting observed facts MUST preserve snapshot consistency.
+- **Rust**: `RustSynScanner` using `syn` crate — full recursive expression walker for call extraction
+- **Python**: `TreeSitterScanner` with tree-sitter `(call function: ...)` queries
+- **TypeScript/TSX**: `TreeSitterScanner` with tree-sitter `(call_expression function: ...)` queries
+- **Go**: `TreeSitterScanner` with tree-sitter `(call_expression function: ...)` queries
+
+### File Watcher
+Background watcher using `notify` crate:
+- Filters: `.rs`, `.py`, `.ts`, `.tsx` files only; excludes `target/` and `node_modules/`
+- 2-second debounce to batch rapid changes
+- Auto-triggers `scan_model` + `compute_drift` on file changes
 
 ---
 
@@ -526,10 +447,10 @@ Re-validate before:
 
 ### No Hidden Assumptions
 Statements like:
-- “validated upstream”
-- “trusted input”
-- “caller guarantees”
-- “should never happen”
+- "validated upstream"
+- "trusted input"
+- "caller guarantees"
+- "should never happen"
 are forbidden unless mechanically enforced and tested.
 
 ---
@@ -560,11 +481,10 @@ When generating or modifying code, you are the last line of defense before hosti
 - injection-resistant query construction
 - negative tests for security and invariant boundaries
 
-### Failure Modes to Defensively Index
+### Failure Modes to Defensively Handle
 - malformed JSON
 - invalid canonical IDs
 - duplicate entity collisions
-- provenance gaps
 - transaction rollback failures
 - partial graph ingestion
 - recursive rule explosion
@@ -572,7 +492,6 @@ When generating or modifying code, you are the last line of defense before hosti
 - unsupported language constructs
 - timeout / cancellation
 - out-of-memory or unbounded traversal
-- snapshot mismatch
 
 ---
 
@@ -593,7 +512,6 @@ Before changing logic, inspect analogous pathways across the codebase to maintai
 For:
 - recursive rules
 - invariant evaluation
-- provenance handling
 - deletion safety
 - diff semantics
 - failure mode handling
@@ -605,47 +523,46 @@ State transitions MUST be explicit, auditable, and reconstructable.
 
 ## TEST STRATEGY
 
-At minimum, tests MUST exist for:
+149 tests across 4 test suites:
 
-### Ontology / Identity
-- stable ID generation
-- canonical naming normalization
-- duplicate handling
-- entity versioning rules
+### Unit Tests (90 tests in `src/`)
+- **Domain**: struct classification, live dep extraction, scan file (fields, methods, impl blocks, trait impls, private structs), actual model scanning
+- **MCP tools**: tool listing, dispatch routing, invariant checking, blast radius, dependency path, can_delete_symbol
+- **MCP write tools**: create/update/remove bounded contexts, entities, services, events; aggregate upsert; policy merge; refactor lifecycle (plan/accept/reset); diagnose pipeline
+- **MCP prompts**: prompt listing, content generation with health sections
+- **MCP resources**: resource listing, context resources, overview resource
+- **Server**: initialize handshake, ping, method routing, error handling
+- **Store**: save/load roundtrip, upsert, accept/reset, diff graph (field-level, method-level), circular deps, transitive deps, impact analysis, Datalog queries, drift computation, snapshots (list/diff), rich model roundtrip
 
-### Ingest
-- valid AST ingestion
-- malformed payload rejection
-- partial payload rejection
-- provenance persistence
-- idempotent re-ingest
-- snapshot isolation
+### Datalog Rule Tests (35 tests in `tests/datalog_rules.rs`)
+- **Transitive closure**: linear chain, diamond deps, isolated node
+- **Cycle detection**: direct pair, self-loop, 3-hop cycle, no-cycle DAG
+- **Layer violations**: domain→infra detected, clean architecture passes
+- **Policy violations**: forbidden layer deps, forbidden context deps, clean passes
+- **Dependency paths**: direct, transitive, disconnected
+- **Deletion safety**: unreferenced entity deletable, event source blocks, repository blocks
+- **Orphan/god context detection**: orphan identified, element counts verified
+- **Impact analysis**: events, services, and dependent contexts
+- **Model health**: perfect score, cycle degradation
+- **Aggregate quality**: roots without invariants detected
+- **Drift**: desired-actual divergence, empty when synced
+- **Full-text search**: description-based search
+- **Call graph**: callers, callees, reachability, stats
+- **Validity time-travel**: copy_state modules/api_endpoints/ast_edges, accept/reset roundtrip, snapshot_log recording, diff_snapshots detection, clear_state api_endpoint retraction
 
-### Datalog Reasoning
-- transitive closure correctness
-- cycle detection
-- forbidden dependency detection
-- blast radius accuracy
-- dead code / in-degree analysis
-- unknown-state behavior
+### Reasoning Integration Tests (16 tests in `tests/reasoning_integration.rs`)
+- First-class relation queries: field-level diff, method search, param analysis, type usage, invariant coverage, VO validation rules
+- Cross-context event field joins
+- Performance: save/load/diff cycle, 10-context scale test
 
-### Policy Enforcement
-- intended vs observed mismatch detection
-- restricted proposition parsing
-- invalid policy rejection
-
-### MCP Contract
-- schema validation
-- deterministic outputs
-- bounded failure behavior
-- proof payload completeness
-
-### Security / Resilience
-- injection attempts
-- oversized inputs
-- cancellation
-- timeout behavior
-- transaction rollback integrity
+### Self-Integration Tests (8 tests in `tests/self_integration.rs`)
+- Self-scan: dendrites scans its own codebase via MCP tool dispatch
+- Persist/show roundtrip
+- Model value proofs via Datalog
+- Cross-cutting insights
+- Mutation and enrichment
+- Refactor lifecycle end-to-end
+- Diagnose improvement loop
 
 ---
 
@@ -654,7 +571,7 @@ At minimum, tests MUST exist for:
 Correctness is primary, but pathological behavior is unacceptable.
 
 The implementation SHOULD:
-- index relations used in recursive traversal
+- index relations used in recursive traversal (19 secondary indices exist)
 - bound or paginate large proof outputs
 - separate hot-path queries from heavy diagnostic queries
 - provide truncation metadata when output is capped
@@ -674,10 +591,10 @@ When returning results to AI agents or humans:
 - state limitations explicitly
 
 Good:
-- “False. `payments.domain` imports `payments.infra` through path A → B → C. Witness edges: …”
+- "False. `payments.domain` imports `payments.infra` through path A → B → C. Witness edges: …"
 
 Bad:
-- “This seems architecturally suspicious.”
+- "This seems architecturally suspicious."
 
 ---
 
@@ -686,17 +603,17 @@ Bad:
 Avoid empty grandiosity in implementation docs and code comments.
 
 Do not rely on phrases like:
-- “irrefutable”
-- “superintelligence”
-- “human-like cognition”
-- “biological thought engine”
+- "irrefutable"
+- "superintelligence"
+- "human-like cognition"
+- "biological thought engine"
 
 Prefer precise technical claims:
-- “repo-grounded”
-- “snapshot-consistent”
-- “proof-carrying”
-- “Datalog-derived”
-- “provenance-backed”
+- "repo-grounded"
+- "snapshot-consistent"
+- "proof-carrying"
+- "Datalog-derived"
+- "temporally-consistent"
 
 ---
 
@@ -704,7 +621,6 @@ Prefer precise technical claims:
 
 If code works but lacks formal architectural grounding, refactor it.
 If code is persuasive but not provable, reject it.
-If a tool can answer only by guessing, return `unknown`.
 If a result cannot be traced to facts and rules, it does not belong in `dendrites`.
 
 **Isomorphic Correctness > Cleverness**

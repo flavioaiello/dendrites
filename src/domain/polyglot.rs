@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
-use super::analyze::{DiscoveredMethod, DiscoveredStruct, LiveDependency, ScanResult};
+use super::analyze::{CallInfo, DiscoveredMethod, DiscoveredStruct, LiveDependency, ScanResult};
 use super::model::Field;
 use super::scanner::AstScanner;
 
@@ -39,14 +39,8 @@ impl TreeSitterScanner {
                 tree_sitter_typescript::LANGUAGE_TSX.into(),
                 LangFamily::TypeScript,
             )),
-            "py" => Some((
-                tree_sitter_python::LANGUAGE.into(),
-                LangFamily::Python,
-            )),
-            "go" => Some((
-                tree_sitter_go::LANGUAGE.into(),
-                LangFamily::Go,
-            )),
+            "py" => Some((tree_sitter_python::LANGUAGE.into(), LangFamily::Python)),
+            "go" => Some((tree_sitter_go::LANGUAGE.into(), LangFamily::Go)),
             _ => None,
         }
     }
@@ -261,8 +255,7 @@ fn python_extract_init_fields(source: &str, class_body: Node) -> Vec<Field> {
                 if let (Some(left), Some(right)) = (
                     assign.child_by_field_name("left"),
                     assign.child_by_field_name("type"),
-                )
-                    && left.kind() == "identifier"
+                ) && left.kind() == "identifier"
                 {
                     let field_name = node_text(left, source).to_string();
                     let field_type = node_text(right, source).to_string();
@@ -691,7 +684,10 @@ fn ts_extract_classes(
                     if child.kind() == "extends_type_clause" {
                         for type_node in children(child) {
                             let kind = type_node.kind();
-                            if kind == "type_identifier" || kind == "generic_type" || kind == "nested_type_identifier" {
+                            if kind == "type_identifier"
+                                || kind == "generic_type"
+                                || kind == "nested_type_identifier"
+                            {
                                 iface_extends.push(node_text(type_node, source).to_string());
                             }
                         }
@@ -1232,6 +1228,162 @@ fn go_parse_params(source: &str, params_node: Node) -> Vec<Field> {
     fields
 }
 
+// ─── Call extraction helpers ───────────────────────────────────────────────
+
+/// Find the enclosing function/method name for a tree-sitter node.
+fn find_enclosing_function<'a>(mut node: Node<'a>, source: &str, family: LangFamily) -> String {
+    loop {
+        match node.parent() {
+            None => return "<module>".to_string(),
+            Some(parent) => {
+                let kind = parent.kind();
+                match family {
+                    LangFamily::Python => {
+                        if kind == "function_definition" {
+                            if let Some(name_node) = parent.child_by_field_name("name") {
+                                // Check if this is a method (inside a class)
+                                if let Some(class_parent) = find_ancestor_class(parent, source) {
+                                    return format!(
+                                        "{}::{}",
+                                        class_parent,
+                                        node_text(name_node, source)
+                                    );
+                                }
+                                return node_text(name_node, source).to_string();
+                            }
+                        }
+                    }
+                    LangFamily::TypeScript => {
+                        if kind == "method_definition"
+                            || kind == "function_declaration"
+                            || kind == "arrow_function"
+                        {
+                            if let Some(name_node) = parent.child_by_field_name("name") {
+                                if let Some(class_parent) = find_ancestor_class(parent, source) {
+                                    return format!(
+                                        "{}::{}",
+                                        class_parent,
+                                        node_text(name_node, source)
+                                    );
+                                }
+                                return node_text(name_node, source).to_string();
+                            }
+                        }
+                    }
+                    LangFamily::Go => {
+                        if kind == "function_declaration" {
+                            if let Some(name_node) = parent.child_by_field_name("name") {
+                                return node_text(name_node, source).to_string();
+                            }
+                        } else if kind == "method_declaration" {
+                            let receiver = parent
+                                .child_by_field_name("receiver")
+                                .map(|r| go_extract_receiver_type(source, r))
+                                .unwrap_or_default();
+                            if let Some(name_node) = parent.child_by_field_name("name") {
+                                if receiver.is_empty() {
+                                    return node_text(name_node, source).to_string();
+                                }
+                                return format!("{}::{}", receiver, node_text(name_node, source));
+                            }
+                        }
+                    }
+                }
+                node = parent;
+            }
+        }
+    }
+}
+
+fn find_ancestor_class(node: Node, source: &str) -> Option<String> {
+    let mut current = node.parent();
+    while let Some(p) = current {
+        if p.kind() == "class_definition" || p.kind() == "class_declaration" {
+            if let Some(name_node) = p.child_by_field_name("name") {
+                return Some(node_text(name_node, source).to_string());
+            }
+        }
+        current = p.parent();
+    }
+    None
+}
+
+fn python_extract_calls(source: &str, tree: &tree_sitter::Tree) -> Vec<CallInfo> {
+    let query_str =
+        "(call function: [(identifier) @fn (attribute attribute: (identifier) @method)])";
+    let lang = tree.language();
+    let query = match Query::new(&lang, query_str) {
+        Ok(q) => q,
+        Err(_) => return vec![],
+    };
+    let mut cursor = QueryCursor::new();
+    let mut calls = Vec::new();
+    let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = iter.next() {
+        for cap in m.captures {
+            let callee = node_text(cap.node, source).to_string();
+            let line = cap.node.start_position().row + 1;
+            let caller = find_enclosing_function(cap.node, source, LangFamily::Python);
+            calls.push(CallInfo {
+                caller,
+                callee,
+                line,
+            });
+        }
+    }
+    calls
+}
+
+fn ts_extract_calls(source: &str, tree: &tree_sitter::Tree) -> Vec<CallInfo> {
+    let query_str = "(call_expression function: [(identifier) @fn (member_expression property: (property_identifier) @method)])";
+    let lang = tree.language();
+    let query = match Query::new(&lang, query_str) {
+        Ok(q) => q,
+        Err(_) => return vec![],
+    };
+    let mut cursor = QueryCursor::new();
+    let mut calls = Vec::new();
+    let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = iter.next() {
+        for cap in m.captures {
+            let callee = node_text(cap.node, source).to_string();
+            let line = cap.node.start_position().row + 1;
+            let caller = find_enclosing_function(cap.node, source, LangFamily::TypeScript);
+            calls.push(CallInfo {
+                caller,
+                callee,
+                line,
+            });
+        }
+    }
+    calls
+}
+
+fn go_extract_calls(source: &str, tree: &tree_sitter::Tree) -> Vec<CallInfo> {
+    let query_str = "(call_expression function: [(identifier) @fn (selector_expression field: (field_identifier) @method)])";
+    let lang = tree.language();
+    let query = match Query::new(&lang, query_str) {
+        Ok(q) => q,
+        Err(_) => return vec![],
+    };
+    let mut cursor = QueryCursor::new();
+    let mut calls = Vec::new();
+    let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = iter.next() {
+        for cap in m.captures {
+            let callee = node_text(cap.node, source).to_string();
+            let line = cap.node.start_position().row + 1;
+            let caller = find_enclosing_function(cap.node, source, LangFamily::Go);
+            calls.push(CallInfo {
+                caller,
+                callee,
+                line,
+            });
+        }
+    }
+    calls
+}
+
 // ─── AstScanner implementation ─────────────────────────────────────────────
 
 impl AstScanner for TreeSitterScanner {
@@ -1264,11 +1416,7 @@ impl AstScanner for TreeSitterScanner {
         Ok(deps)
     }
 
-    fn scan_file(
-        &self,
-        file_path: &Path,
-        source_code: &str,
-    ) -> Result<ScanResult> {
+    fn scan_file(&self, file_path: &Path, source_code: &str) -> Result<ScanResult> {
         let (tree, family) = match self.parse_tree(file_path, source_code)? {
             Some(pair) => pair,
             None => return Ok((vec![], vec![], vec![], vec![])),
@@ -1283,5 +1431,20 @@ impl AstScanner for TreeSitterScanner {
         };
 
         Ok((structs, vec![], methods, vec![]))
+    }
+
+    fn extract_calls(&self, file_path: &Path, source_code: &str) -> Result<Vec<CallInfo>> {
+        let (tree, family) = match self.parse_tree(file_path, source_code)? {
+            Some(pair) => pair,
+            None => return Ok(vec![]),
+        };
+
+        let calls = match family {
+            LangFamily::Python => python_extract_calls(source_code, &tree),
+            LangFamily::TypeScript => ts_extract_calls(source_code, &tree),
+            LangFamily::Go => go_extract_calls(source_code, &tree),
+        };
+
+        Ok(calls)
     }
 }

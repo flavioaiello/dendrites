@@ -1,9 +1,8 @@
-pub mod model;
 pub mod analyze;
-pub mod scanner;
-pub mod rust_syn;
+pub mod model;
 pub mod polyglot;
-
+pub mod rust_syn;
+pub mod scanner;
 
 /// Convert PascalCase / camelCase to snake_case.
 pub fn to_snake(s: &str) -> String {

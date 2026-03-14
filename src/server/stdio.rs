@@ -3,21 +3,20 @@ use serde_json::json;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::domain::model::DomainModel;
-use crate::mcp::{protocol::*, prompts, resources, tools, write_tools};
+use crate::mcp::{prompts, protocol::*, resources, tools, write_tools};
 use crate::store::{CrateRegistry, Store};
 
 /// Load the desired model from store, falling back to an empty model.
 fn load_model(store: &Store, workspace_path: &str) -> DomainModel {
-    store.load_desired(workspace_path).ok().flatten()
+    store
+        .load_desired(workspace_path)
+        .ok()
+        .flatten()
         .unwrap_or_else(|| DomainModel::empty(workspace_path))
 }
 
 /// List of write-tool names used to route `tools/call` to the mutable path.
-const WRITE_TOOLS: &[&str] = &[
-    "set_model",
-    "scan_model",
-    "refactor_model",
-];
+const WRITE_TOOLS: &[&str] = &["define", "sync", "refactor", "constrain"];
 
 /// Run the MCP server over stdio (stdin/stdout), the standard transport for
 /// VS Code / GitHub Copilot MCP integration.
@@ -63,17 +62,15 @@ pub async fn run(registry: std::sync::Arc<CrateRegistry>) -> Result<()> {
     Ok(())
 }
 
-fn handle_request(
-    workspace_path: &str,
-    store: &Store,
-    req: &JsonRpcRequest,
-) -> JsonRpcResponse {
+fn handle_request(workspace_path: &str, store: &Store, req: &JsonRpcRequest) -> JsonRpcResponse {
     match req.method.as_str() {
         // ── Lifecycle ──────────────────────────────────────────────
         "initialize" => {
             // Echo back the client's requested protocol version for compatibility.
             // Fall back to the baseline MCP spec version if not provided.
-            let client_version = req.params.as_ref()
+            let client_version = req
+                .params
+                .as_ref()
                 .and_then(|p| p.get("protocolVersion"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("2024-11-05");
@@ -119,11 +116,7 @@ fn handle_request(
                     }
                 },
                 None => {
-                    return JsonRpcResponse::error(
-                        req.id.clone(),
-                        -32602,
-                        "Missing params",
-                    );
+                    return JsonRpcResponse::error(req.id.clone(), -32602, "Missing params");
                 }
             };
 
@@ -156,11 +149,7 @@ fn handle_request(
                     }
                 },
                 None => {
-                    return JsonRpcResponse::error(
-                        req.id.clone(),
-                        -32602,
-                        "Missing params",
-                    );
+                    return JsonRpcResponse::error(req.id.clone(), -32602, "Missing params");
                 }
             };
 
@@ -189,11 +178,7 @@ fn handle_request(
                     }
                 },
                 None => {
-                    return JsonRpcResponse::error(
-                        req.id.clone(),
-                        -32602,
-                        "Missing params",
-                    );
+                    return JsonRpcResponse::error(req.id.clone(), -32602, "Missing params");
                 }
             };
 
@@ -235,7 +220,7 @@ async fn send(stdout: &mut io::Stdout, resp: &JsonRpcResponse) -> Result<()> {
 mod tests {
     use super::*;
     use crate::mcp::protocol::JsonRpcRequest;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     fn test_store() -> std::sync::Arc<Store> {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -261,14 +246,16 @@ mod tests {
     #[test]
     fn test_initialize_echoes_client_version() {
         let store = test_store();
-        let req = make_request(
-            "initialize",
-            Some(json!({"protocolVersion": "2024-11-05"})),
-        );
+        let req = make_request("initialize", Some(json!({"protocolVersion": "2024-11-05"})));
         let resp = handle_request("/tmp/test-stdio", &store, &req);
         let result = resp.result.unwrap();
         assert_eq!(result["protocolVersion"], "2024-11-05");
-        assert!(result["serverInfo"]["name"].as_str().unwrap().contains("dendrites"));
+        assert!(
+            result["serverInfo"]["name"]
+                .as_str()
+                .unwrap()
+                .contains("dendrites")
+        );
         assert!(result["capabilities"]["tools"].is_object());
         assert!(result["capabilities"]["resources"].is_object());
         assert!(result["capabilities"]["prompts"].is_object());
@@ -308,14 +295,13 @@ mod tests {
         let resp = handle_request("/tmp/test-stdio", &store, &req);
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        let names: Vec<&str> = tools.iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
-        assert!(names.contains(&"get_model"));
-        assert!(names.contains(&"model_health"));
-        assert!(names.contains(&"query_blast_radius"));
-        assert!(names.contains(&"set_model"));
-        assert!(names.contains(&"refactor_model"));
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"architecture"));
+        assert!(names.contains(&"impact"));
+        assert!(names.contains(&"define"));
+        assert!(names.contains(&"refactor"));
+        assert!(names.contains(&"drift"));
+        assert!(names.contains(&"history"));
     }
 
     #[test]
@@ -348,28 +334,25 @@ mod tests {
     }
 
     #[test]
-    fn test_tools_call_model_health() {
+    fn test_tools_call_architecture_health() {
         let store = test_store();
         let req = make_request(
             "tools/call",
-            Some(json!({"name": "model_health", "arguments": {}})),
+            Some(json!({"name": "architecture", "arguments": {}})),
         );
         let resp = handle_request("/tmp/test-stdio", &store, &req);
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         let content = result["content"].as_array().unwrap();
         let text = content[0]["text"].as_str().unwrap();
-        let health: Value = serde_json::from_str(text).unwrap();
-        assert!(health["score"].is_number());
+        let arch: Value = serde_json::from_str(text).unwrap();
+        assert!(arch["health"]["score"].is_number());
     }
 
     #[test]
     fn test_prompts_get_nonexistent_returns_error() {
         let store = test_store();
-        let req = make_request(
-            "prompts/get",
-            Some(json!({"name": "nonexistent_prompt"})),
-        );
+        let req = make_request("prompts/get", Some(json!({"name": "nonexistent_prompt"})));
         let resp = handle_request("/tmp/test-stdio", &store, &req);
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32602);

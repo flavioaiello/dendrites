@@ -4,7 +4,7 @@ use anyhow::Result;
 use notify::{Event, RecursiveMode, Watcher};
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 use tracing::{error, info};
 
 pub struct ActualStateWatcher {
@@ -27,10 +27,9 @@ impl ActualStateWatcher {
                     // Filter: only .rs/.py/.ts/.tsx files, never inside target/ or node_modules/ directories
                     p.extension().is_some_and(|ext| {
                         ext == "rs" || ext == "py" || ext == "ts" || ext == "tsx"
-                    })
-                        && !p.components().any(|c| {
-                            c.as_os_str() == "target" || c.as_os_str() == "node_modules"
-                        })
+                    }) && !p
+                        .components()
+                        .any(|c| c.as_os_str() == "target" || c.as_os_str() == "node_modules")
                 });
 
                 if is_source_file {
@@ -53,12 +52,12 @@ impl ActualStateWatcher {
 
         tokio::spawn(async move {
             // Keep the watcher alive by moving it into the task
-            let _watcher = watcher; 
+            let _watcher = watcher;
 
             loop {
                 // 2. Wait for the first file-change event
                 if rx.recv().await.is_none() {
-                    break; 
+                    break;
                 }
 
                 // 3. Debounce: wait to see if more events arrive in the next 2 seconds
@@ -71,7 +70,7 @@ impl ActualStateWatcher {
                                 return; // Channel closed, exit the task completely
                             }
                             // Reset the debounce timer if another event comes in
-                            continue; 
+                            continue;
                         }
                         _ = sleep(debounce_duration) => {
                             // Timer expired, time to sync!
@@ -106,13 +105,17 @@ async fn sync_all_crates(registry: &CrateRegistry) -> Result<()> {
 
         // Save into this crate's local store
         entry.store.save_actual(&ws, &actual)?;
+        let _ = entry.store.compute_drift(&ws);
 
         // Auto-bootstrap: if desired state is empty (first-time scan), seed it
         // from the freshly discovered actual state so the model is immediately
         // ready for refinement without requiring a manual `reset`.
         if entry.store.load_desired(&ws)?.is_none() {
             entry.store.reset(&ws)?;
-            info!("Bootstrapped desired model from actual for crate '{}'", entry.name);
+            info!(
+                "Bootstrapped desired model from actual for crate '{}'",
+                entry.name
+            );
         }
 
         info!("Synced actual model for crate '{}'", entry.name);

@@ -81,18 +81,17 @@ async fn main() -> Result<()> {
         // Default: serve from cwd
         None => {
             let workspace = resolve_workspace(None);
-            let registry = std::sync::Arc::new(
-                store::CrateRegistry::open(std::path::Path::new(&workspace))?
-            );
+            let registry = std::sync::Arc::new(store::CrateRegistry::open(std::path::Path::new(
+                &workspace,
+            ))?);
             tracing::info!(
                 "Dendrites Server starting for workspace: {} ({} crate(s))",
                 workspace,
                 registry.crates().len()
             );
 
-            let watcher = server::watcher::ActualStateWatcher::new(
-                std::sync::Arc::clone(&registry),
-            );
+            let watcher =
+                server::watcher::ActualStateWatcher::new(std::sync::Arc::clone(&registry));
 
             tokio::spawn(async move {
                 if let Err(e) = watcher.spawn().await {
@@ -105,18 +104,17 @@ async fn main() -> Result<()> {
 
         Some(Commands::Serve { workspace }) => {
             let workspace = resolve_workspace(workspace);
-            let registry = std::sync::Arc::new(
-                store::CrateRegistry::open(std::path::Path::new(&workspace))?
-            );
+            let registry = std::sync::Arc::new(store::CrateRegistry::open(std::path::Path::new(
+                &workspace,
+            ))?);
             tracing::info!(
                 "Dendrites Server starting for workspace: {} ({} crate(s))",
                 workspace,
                 registry.crates().len()
             );
 
-            let watcher = server::watcher::ActualStateWatcher::new(
-                std::sync::Arc::clone(&registry),
-            );
+            let watcher =
+                server::watcher::ActualStateWatcher::new(std::sync::Arc::clone(&registry));
 
             // Spawn the background watcher
             tokio::spawn(async move {
@@ -128,12 +126,19 @@ async fn main() -> Result<()> {
             server::stdio::run(registry).await?;
         }
 
-        Some(Commands::Export { file, workspace, state }) => {
+        Some(Commands::Export {
+            file,
+            workspace,
+            state,
+        }) => {
             let registry = store::CrateRegistry::open(std::path::Path::new(&workspace))?;
             let entry = registry.primary();
             let ws = entry.workspace_key();
             entry.store.export_to_file(&ws, &file, &state)?;
-            eprintln!("Exported {} model for crate '{}' to: {}", state, entry.name, file);
+            eprintln!(
+                "Exported {} model for crate '{}' to: {}",
+                state, entry.name, file
+            );
         }
 
         Some(Commands::List { workspace }) => {
@@ -143,7 +148,9 @@ async fn main() -> Result<()> {
             eprintln!("{}", "-".repeat(90));
             for entry in registry.crates() {
                 let ws = entry.workspace_key();
-                let has_model = entry.store.load_desired(&ws)
+                let has_model = entry
+                    .store
+                    .load_desired(&ws)
                     .ok()
                     .flatten()
                     .is_some_and(|m| !m.bounded_contexts.is_empty());
@@ -179,27 +186,58 @@ async fn main() -> Result<()> {
                 let desired = entry.store.load_desired(&ws)?;
                 let actual = domain::analyze::scan_actual_model(&entry.root, desired.as_ref())?;
 
-                let entity_count: usize = actual.bounded_contexts.iter().map(|bc| bc.entities.len()).sum();
-                let vo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.value_objects.len()).sum();
-                let svc_count: usize = actual.bounded_contexts.iter().map(|bc| bc.services.len()).sum();
-                let repo_count: usize = actual.bounded_contexts.iter().map(|bc| bc.repositories.len()).sum();
-                let event_count: usize = actual.bounded_contexts.iter().map(|bc| bc.events.len()).sum();
+                let entity_count: usize = actual
+                    .bounded_contexts
+                    .iter()
+                    .map(|bc| bc.entities.len())
+                    .sum();
+                let vo_count: usize = actual
+                    .bounded_contexts
+                    .iter()
+                    .map(|bc| bc.value_objects.len())
+                    .sum();
+                let svc_count: usize = actual
+                    .bounded_contexts
+                    .iter()
+                    .map(|bc| bc.services.len())
+                    .sum();
+                let repo_count: usize = actual
+                    .bounded_contexts
+                    .iter()
+                    .map(|bc| bc.repositories.len())
+                    .sum();
+                let event_count: usize = actual
+                    .bounded_contexts
+                    .iter()
+                    .map(|bc| bc.events.len())
+                    .sum();
 
                 entry.store.save_actual(&ws, &actual)?;
 
                 // Auto-bootstrap: seed desired from actual on first scan
                 if entry.store.load_desired(&ws)?.is_none() {
                     entry.store.reset(&ws)?;
-                    eprintln!("  Bootstrapped desired model from actual for crate '{}'", entry.name);
+                    eprintln!(
+                        "  Bootstrapped desired model from actual for crate '{}'",
+                        entry.name
+                    );
                 }
 
                 eprintln!(
                     "Crate '{}': {} contexts → {} entities, {} VOs, {} services, {} repos, {} events",
-                    entry.name, actual.bounded_contexts.len(),
-                    entity_count, vo_count, svc_count, repo_count, event_count
+                    entry.name,
+                    actual.bounded_contexts.len(),
+                    entity_count,
+                    vo_count,
+                    svc_count,
+                    repo_count,
+                    event_count
                 );
             }
-            eprintln!("Actual model saved for {} crate(s).", registry.crates().len());
+            eprintln!(
+                "Actual model saved for {} crate(s).",
+                registry.crates().len()
+            );
         }
     }
 
