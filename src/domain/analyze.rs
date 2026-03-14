@@ -1710,4 +1710,81 @@ impl User {
         // Cleanup
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    #[test]
+    fn test_scan_actual_model_java_discovery() {
+        use std::env::temp_dir;
+        use std::fs;
+
+        let tmp = temp_dir().join(format!("dendrites_java_test_{}", std::process::id()));
+        let src = tmp.join("src").join("orders");
+        fs::create_dir_all(&src).unwrap();
+
+        fs::write(
+            src.join("Order.java"),
+            r#"
+package com.example.orders;
+
+import java.util.List;
+
+public class Order {
+    private String orderId;
+    private double total;
+
+    public void addItem(String item) {
+        // business logic
+    }
+
+    public double getTotal() {
+        return total;
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            src.join("OrderRepository.java"),
+            r#"
+package com.example.orders;
+
+public interface OrderRepository {
+    Order findById(String id);
+    void save(Order order);
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            src.join("OrderStatus.java"),
+            r#"
+package com.example.orders;
+
+public enum OrderStatus {
+    PENDING, CONFIRMED, SHIPPED, CANCELLED;
+}
+"#,
+        )
+        .unwrap();
+
+        let actual = scan_actual_model(&tmp, None).unwrap();
+        assert_eq!(actual.bounded_contexts.len(), 1);
+        let bc = &actual.bounded_contexts[0];
+        assert_eq!(bc.name, "orders");
+
+        // Order: has data fields + methods → Entity
+        assert!(bc.entities.iter().any(|e| e.name == "Order"));
+        let order = bc.entities.iter().find(|e| e.name == "Order").unwrap();
+        assert_eq!(order.fields.len(), 2);
+        assert!(order.methods.len() >= 2);
+
+        // OrderRepository: naming convention → Repository
+        assert!(bc.repositories.iter().any(|r| r.name == "OrderRepository"));
+
+        // OrderStatus: enum → ValueObject
+        assert!(bc.value_objects.iter().any(|v| v.name == "OrderStatus"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }

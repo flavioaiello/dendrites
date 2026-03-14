@@ -2056,3 +2056,409 @@ impl AstScanner for TreeSitterScanner {
         Ok(calls)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::scanner::AstScanner;
+    use std::path::Path;
+
+    fn scanner() -> TreeSitterScanner {
+        TreeSitterScanner::new()
+    }
+
+    // ── Python ─────────────────────────────────────────────────────────────
+
+    const PYTHON_SOURCE: &str = r#"
+import os
+from collections import OrderedDict
+from typing import List
+
+class Order:
+    def __init__(self, order_id: str, total: float):
+        self.order_id = order_id
+        self.total = total
+
+    def apply_discount(self, percent: float) -> float:
+        return self.total * (1 - percent)
+
+    def _internal(self):
+        pass
+
+class OrderService:
+    def process(self, order: Order) -> bool:
+        order.apply_discount(0.1)
+        return True
+"#;
+
+    #[test]
+    fn test_python_imports() {
+        let deps = scanner()
+            .extract_live_dependencies(Path::new("test.py"), PYTHON_SOURCE)
+            .unwrap();
+        assert!(deps.iter().any(|d| d.to_module == "os"));
+        assert!(deps.iter().any(|d| d.to_module == "collections"));
+    }
+
+    #[test]
+    fn test_python_classes_and_methods() {
+        let (structs, _, methods, _) = scanner()
+            .scan_file(Path::new("test.py"), PYTHON_SOURCE)
+            .unwrap();
+        assert_eq!(structs.len(), 2);
+
+        let order = structs.iter().find(|s| s.name == "Order").unwrap();
+        assert_eq!(order.fields.len(), 2);
+        assert!(order.fields.iter().any(|f| f.name == "order_id"));
+        assert!(order.fields.iter().any(|f| f.name == "total"));
+
+        // apply_discount is a method on Order
+        let order_methods: Vec<_> = methods.iter().filter(|m| m.owner == "Order").collect();
+        assert!(order_methods.iter().any(|m| m.name == "apply_discount"));
+    }
+
+    #[test]
+    fn test_python_calls() {
+        let calls = scanner()
+            .extract_calls(Path::new("test.py"), PYTHON_SOURCE)
+            .unwrap();
+        assert!(calls.iter().any(|c| c.callee == "apply_discount"));
+    }
+
+    #[test]
+    fn test_python_modules() {
+        let (_, _, _, modules) = scanner()
+            .scan_file(Path::new("src/billing/order.py"), PYTHON_SOURCE)
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "order");
+    }
+
+    #[test]
+    fn test_python_modules_init_excluded() {
+        let (_, _, _, modules) = scanner()
+            .scan_file(Path::new("src/billing/__init__.py"), "")
+            .unwrap();
+        assert!(modules.is_empty());
+    }
+
+    // ── TypeScript ─────────────────────────────────────────────────────────
+
+    const TS_SOURCE: &str = r#"
+import { Injectable } from '@nestjs/common';
+import { Repository } from './repository';
+
+export interface Identifiable {
+    id: string;
+}
+
+export class UserService {
+    private repo: Repository;
+
+    constructor(repo: Repository) {
+        this.repo = repo;
+    }
+
+    public findUser(id: string): User {
+        return this.repo.findById(id);
+    }
+
+    private validate(user: User): boolean {
+        return user.id !== '';
+    }
+}
+
+export class User implements Identifiable {
+    id: string;
+    name: string;
+    email: string;
+}
+"#;
+
+    #[test]
+    fn test_ts_imports() {
+        let deps = scanner()
+            .extract_live_dependencies(Path::new("test.ts"), TS_SOURCE)
+            .unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.to_module == "@nestjs/common"));
+        assert!(deps.iter().any(|d| d.to_module == "./repository"));
+    }
+
+    #[test]
+    fn test_ts_classes_and_interfaces() {
+        let (structs, _, methods, _) = scanner()
+            .scan_file(Path::new("test.ts"), TS_SOURCE)
+            .unwrap();
+        // Identifiable (interface), UserService (class), User (class)
+        assert!(structs.len() >= 2);
+
+        let user = structs.iter().find(|s| s.name == "User").unwrap();
+        assert_eq!(user.fields.len(), 3);
+        assert!(user.implements.contains(&"Identifiable".to_string()));
+
+        let svc = structs.iter().find(|s| s.name == "UserService");
+        assert!(svc.is_some());
+    }
+
+    #[test]
+    fn test_ts_calls() {
+        let calls = scanner()
+            .extract_calls(Path::new("test.ts"), TS_SOURCE)
+            .unwrap();
+        assert!(calls.iter().any(|c| c.callee.contains("findById")));
+    }
+
+    #[test]
+    fn test_ts_modules() {
+        let (_, _, _, modules) = scanner()
+            .scan_file(Path::new("src/users/service.ts"), TS_SOURCE)
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "service");
+    }
+
+    #[test]
+    fn test_ts_modules_index_excluded() {
+        let (_, _, _, modules) = scanner()
+            .scan_file(Path::new("src/users/index.ts"), TS_SOURCE)
+            .unwrap();
+        assert!(modules.is_empty());
+    }
+
+    // ── Go ─────────────────────────────────────────────────────────────────
+
+    const GO_SOURCE: &str = r#"
+package billing
+
+import (
+    "fmt"
+    "context"
+)
+
+type Invoice struct {
+    ID     string
+    Amount float64
+    items  []Item
+}
+
+type Reader interface {
+    Read(ctx context.Context) ([]byte, error)
+}
+
+func (i *Invoice) Apply(discount float64) float64 {
+    return i.Amount * (1 - discount)
+}
+
+func NewInvoice(id string) *Invoice {
+    fmt.Println("creating invoice")
+    return &Invoice{ID: id}
+}
+"#;
+
+    #[test]
+    fn test_go_imports() {
+        let deps = scanner()
+            .extract_live_dependencies(Path::new("test.go"), GO_SOURCE)
+            .unwrap();
+        assert!(deps.iter().any(|d| d.to_module == "fmt"));
+        assert!(deps.iter().any(|d| d.to_module == "context"));
+    }
+
+    #[test]
+    fn test_go_structs_and_interfaces() {
+        let (structs, _, methods, _) = scanner()
+            .scan_file(Path::new("test.go"), GO_SOURCE)
+            .unwrap();
+        assert!(structs.len() >= 2);
+
+        let invoice = structs.iter().find(|s| s.name == "Invoice").unwrap();
+        // Only exported (capitalized) fields: ID, Amount — items is private
+        assert_eq!(invoice.fields.len(), 2);
+        assert!(invoice.fields.iter().any(|f| f.name == "ID"));
+        assert!(invoice.fields.iter().any(|f| f.name == "Amount"));
+
+        let reader = structs.iter().find(|s| s.name == "Reader").unwrap();
+        assert!(!reader.fields.is_empty()); // Read method signature as field
+
+        // Apply is a method on Invoice
+        let apply = methods.iter().find(|m| m.name == "Apply").unwrap();
+        assert_eq!(apply.owner, "Invoice");
+    }
+
+    #[test]
+    fn test_go_calls() {
+        let calls = scanner()
+            .extract_calls(Path::new("test.go"), GO_SOURCE)
+            .unwrap();
+        assert!(calls.iter().any(|c| c.callee == "Println"));
+    }
+
+    #[test]
+    fn test_go_modules() {
+        let (_, _, _, modules) = scanner()
+            .scan_file(Path::new("invoice.go"), GO_SOURCE)
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "billing");
+    }
+
+    #[test]
+    fn test_go_modules_main_excluded() {
+        let main_src = "package main\n\nfunc main() {}\n";
+        let (_, _, _, modules) = scanner()
+            .scan_file(Path::new("main.go"), main_src)
+            .unwrap();
+        assert!(modules.is_empty());
+    }
+
+    // ── Java ───────────────────────────────────────────────────────────────
+
+    const JAVA_SOURCE: &str = r#"
+package com.example.orders;
+
+import java.util.List;
+import com.example.shared.BaseEntity;
+
+@Entity
+public class Order extends BaseEntity implements Serializable {
+    private String orderId;
+    private List<OrderItem> items;
+    private double totalAmount;
+
+    public Order(String orderId) {
+        this.orderId = orderId;
+    }
+
+    public void addItem(OrderItem item) {
+        items.add(item);
+        recalculate();
+    }
+
+    public double getTotal() {
+        return totalAmount;
+    }
+
+    private void recalculate() {
+        totalAmount = items.stream().mapToDouble(OrderItem.getPrice).sum();
+    }
+}
+"#;
+
+    const JAVA_INTERFACE_SOURCE: &str = r#"
+package com.example.orders;
+
+public interface OrderRepository {
+    Order findById(String id);
+    List<Order> findAll();
+    void save(Order order);
+}
+"#;
+
+    const JAVA_ENUM_SOURCE: &str = r#"
+package com.example.orders;
+
+public enum OrderStatus {
+    PENDING, CONFIRMED, SHIPPED, DELIVERED, CANCELLED;
+}
+"#;
+
+    #[test]
+    fn test_java_imports() {
+        let deps = scanner()
+            .extract_live_dependencies(Path::new("Order.java"), JAVA_SOURCE)
+            .unwrap();
+        assert_eq!(deps.len(), 2);
+        assert!(deps.iter().any(|d| d.to_module == "java.util.List"));
+        assert!(deps
+            .iter()
+            .any(|d| d.to_module == "com.example.shared.BaseEntity"));
+    }
+
+    #[test]
+    fn test_java_class_extraction() {
+        let (structs, _, methods, _) = scanner()
+            .scan_file(Path::new("Order.java"), JAVA_SOURCE)
+            .unwrap();
+
+        assert_eq!(structs.len(), 1);
+        let order = &structs[0];
+        assert_eq!(order.name, "Order");
+        assert!(order.extends.contains(&"BaseEntity".to_string()));
+        assert!(order.implements.contains(&"Serializable".to_string()));
+
+        // Fields: orderId, items, totalAmount
+        assert_eq!(order.fields.len(), 3);
+        assert!(order.fields.iter().any(|f| f.name == "orderId"));
+        assert!(order.fields.iter().any(|f| f.name == "totalAmount"));
+
+        // Annotations captured as decorators
+        assert!(order.decorators.iter().any(|d| d.contains("Entity")));
+
+        // Public methods only (recalculate is private → excluded)
+        let order_methods: Vec<_> = methods.iter().filter(|m| m.owner == "Order").collect();
+        assert!(order_methods.iter().any(|m| m.name == "addItem"));
+        assert!(order_methods.iter().any(|m| m.name == "getTotal"));
+        assert!(!order_methods.iter().any(|m| m.name == "recalculate"));
+    }
+
+    #[test]
+    fn test_java_interface_extraction() {
+        let (structs, _, _, _) = scanner()
+            .scan_file(Path::new("OrderRepository.java"), JAVA_INTERFACE_SOURCE)
+            .unwrap();
+
+        assert_eq!(structs.len(), 1);
+        let repo = &structs[0];
+        assert_eq!(repo.name, "OrderRepository");
+        // Interface methods captured as fields (method signatures)
+        assert!(repo.fields.len() >= 3);
+        assert!(repo.fields.iter().any(|f| f.name == "findById"));
+        assert!(repo.fields.iter().any(|f| f.name == "findAll"));
+        assert!(repo.fields.iter().any(|f| f.name == "save"));
+    }
+
+    #[test]
+    fn test_java_enum_extraction() {
+        let (structs, _, _, _) = scanner()
+            .scan_file(Path::new("OrderStatus.java"), JAVA_ENUM_SOURCE)
+            .unwrap();
+
+        assert_eq!(structs.len(), 1);
+        let status = &structs[0];
+        assert_eq!(status.name, "OrderStatus");
+        assert_eq!(status.fields.len(), 5);
+        assert!(status.fields.iter().any(|f| f.name == "PENDING"));
+        assert!(status.fields.iter().any(|f| f.name == "CANCELLED"));
+    }
+
+    #[test]
+    fn test_java_calls() {
+        let calls = scanner()
+            .extract_calls(Path::new("Order.java"), JAVA_SOURCE)
+            .unwrap();
+        assert!(calls.iter().any(|c| c.callee.contains("add")));
+        assert!(calls.iter().any(|c| c.callee.contains("recalculate")));
+    }
+
+    #[test]
+    fn test_java_modules() {
+        let (_, _, _, modules) = scanner()
+            .scan_file(Path::new("Order.java"), JAVA_SOURCE)
+            .unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].name, "com.example.orders");
+    }
+
+    #[test]
+    fn test_java_method_params() {
+        let (_, _, methods, _) = scanner()
+            .scan_file(Path::new("Order.java"), JAVA_SOURCE)
+            .unwrap();
+        let add_item = methods.iter().find(|m| m.name == "addItem").unwrap();
+        assert_eq!(add_item.parameters.len(), 1);
+        assert_eq!(add_item.parameters[0].name, "item");
+        assert_eq!(add_item.parameters[0].field_type, "OrderItem");
+        assert_eq!(add_item.return_type, "void");
+    }
+}
