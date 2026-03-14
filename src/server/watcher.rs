@@ -26,7 +26,7 @@ impl ActualStateWatcher {
                 let is_source_file = event.paths.iter().any(|p| {
                     // Filter: only .rs/.py/.ts/.tsx files, never inside target/ or node_modules/ directories
                     p.extension().is_some_and(|ext| {
-                        ext == "rs" || ext == "py" || ext == "ts" || ext == "tsx"
+                        ext == "rs" || ext == "py" || ext == "ts" || ext == "tsx" || ext == "go" || ext == "java"
                     }) && !p
                         .components()
                         .any(|c| c.as_os_str() == "target" || c.as_os_str() == "node_modules")

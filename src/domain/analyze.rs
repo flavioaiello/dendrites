@@ -90,7 +90,7 @@ pub fn extract_live_dependencies(
 fn scanner_for_path(path: &Path) -> Option<Box<dyn AstScanner>> {
     match path.extension()?.to_str()? {
         "rs" => Some(Box::new(RustSynScanner)),
-        "py" | "ts" | "tsx" => Some(Box::new(TreeSitterScanner::new())),
+        "py" | "ts" | "tsx" | "go" | "java" => Some(Box::new(TreeSitterScanner::new())),
         _ => None,
     }
 }

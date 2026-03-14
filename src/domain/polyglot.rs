@@ -12,6 +12,7 @@ enum LangFamily {
     TypeScript,
     Python,
     Go,
+    Java,
 }
 
 /// A polyglot scanner using Tree-Sitter to parse non-Rust files.
@@ -41,6 +42,7 @@ impl TreeSitterScanner {
             )),
             "py" => Some((tree_sitter_python::LANGUAGE.into(), LangFamily::Python)),
             "go" => Some((tree_sitter_go::LANGUAGE.into(), LangFamily::Go)),
+            "java" => Some((tree_sitter_java::LANGUAGE.into(), LangFamily::Java)),
             _ => None,
         }
     }
@@ -1288,6 +1290,20 @@ fn find_enclosing_function<'a>(mut node: Node<'a>, source: &str, family: LangFam
                             }
                         }
                     }
+                    LangFamily::Java => {
+                        if kind == "method_declaration" || kind == "constructor_declaration" {
+                            if let Some(name_node) = parent.child_by_field_name("name") {
+                                if let Some(class_parent) = find_ancestor_class(parent, source) {
+                                    return format!(
+                                        "{}::{}",
+                                        class_parent,
+                                        node_text(name_node, source)
+                                    );
+                                }
+                                return node_text(name_node, source).to_string();
+                            }
+                        }
+                    }
                 }
                 node = parent;
             }
@@ -1384,6 +1400,518 @@ fn go_extract_calls(source: &str, tree: &tree_sitter::Tree) -> Vec<CallInfo> {
     calls
 }
 
+// ─── Java extraction ───────────────────────────────────────────────────────────────
+
+fn java_extract_imports(source: &str, tree: &tree_sitter::Tree) -> Vec<String> {
+    let query_src = "(import_declaration) @import";
+    let language = tree.language();
+    let query = match Query::new(&language, query_src) {
+        Ok(q) => q,
+        Err(e) => {
+            tracing::warn!("Failed to compile Java import query: {e}");
+            return vec![];
+        }
+    };
+    let mut cursor = QueryCursor::new();
+    let mut imports = Vec::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let raw = node_text(cap.node, source);
+            // Strip `import ` prefix and trailing `;`
+            let cleaned = raw
+                .trim_start_matches("import ")
+                .trim_start_matches("static ")
+                .trim_end_matches(';')
+                .trim();
+            if !cleaned.is_empty() {
+                imports.push(cleaned.to_string());
+            }
+        }
+    }
+    imports
+}
+
+fn java_extract_classes(
+    source: &str,
+    tree: &tree_sitter::Tree,
+    file_path: &str,
+) -> (Vec<DiscoveredStruct>, Vec<DiscoveredMethod>) {
+    let mut structs = Vec::new();
+    let mut methods = Vec::new();
+    let language = tree.language();
+
+    // Extract classes
+    let class_query_src = r#"
+        (class_declaration
+          name: (identifier) @class_name
+          body: (class_body) @class_body) @class_node
+    "#;
+
+    if let Ok(query) = Query::new(&language, class_query_src) {
+        let name_idx = query.capture_index_for_name("class_name").unwrap();
+        let body_idx = query.capture_index_for_name("class_body").unwrap();
+        let class_node_idx = query.capture_index_for_name("class_node").unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        while let Some(m) = matches.next() {
+            let mut name = "";
+            let mut body_node = None;
+            let mut class_node = None;
+
+            for cap in m.captures {
+                if cap.index == name_idx {
+                    name = node_text(cap.node, source);
+                } else if cap.index == body_idx {
+                    body_node = Some(cap.node);
+                } else if cap.index == class_node_idx {
+                    class_node = Some(cap.node);
+                }
+            }
+
+            if name.is_empty() {
+                continue;
+            }
+
+            let cn = match class_node {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Extract extends/implements
+            let mut extends = Vec::new();
+            let mut implements = Vec::new();
+            for child in children(cn) {
+                if child.kind() == "superclass" {
+                    if let Some(type_node) = child.child_by_field_name("type").or_else(|| child.child(1)) {
+                        extends.push(node_text(type_node, source).to_string());
+                    }
+                } else if child.kind() == "super_interfaces" {
+                    for iface_child in children(child) {
+                        if iface_child.kind() == "type_list" {
+                            for type_node in children(iface_child) {
+                                let iface_name = node_text(type_node, source).to_string();
+                                if !iface_name.is_empty() && iface_name != "," {
+                                    implements.push(iface_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Extract annotations as decorators
+            let decorators = java_extract_annotations(cn, source);
+
+            // Extract fields and methods from class body
+            let fields = body_node
+                .map(|b| java_extract_fields(source, b))
+                .unwrap_or_default();
+
+            let class_methods = body_node
+                .map(|b| java_extract_methods(source, b, name, file_path))
+                .unwrap_or_default();
+            methods.extend(class_methods);
+
+            structs.push(DiscoveredStruct {
+                name: name.to_string(),
+                start_line: cn.start_position().row + 1,
+                end_line: cn.end_position().row + 1,
+                fields,
+                file_path: file_path.to_string(),
+                extends,
+                implements,
+                decorators,
+            });
+        }
+    }
+
+    // Extract interfaces
+    let iface_query_src = r#"
+        (interface_declaration
+          name: (identifier) @iface_name
+          body: (interface_body) @iface_body) @iface_node
+    "#;
+
+    if let Ok(query) = Query::new(&language, iface_query_src) {
+        let name_idx = query.capture_index_for_name("iface_name").unwrap();
+        let body_idx = query.capture_index_for_name("iface_body").unwrap();
+        let iface_node_idx = query.capture_index_for_name("iface_node").unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        while let Some(m) = matches.next() {
+            let mut name = "";
+            let mut body_node = None;
+            let mut iface_node = None;
+
+            for cap in m.captures {
+                if cap.index == name_idx {
+                    name = node_text(cap.node, source);
+                } else if cap.index == body_idx {
+                    body_node = Some(cap.node);
+                } else if cap.index == iface_node_idx {
+                    iface_node = Some(cap.node);
+                }
+            }
+
+            if name.is_empty() {
+                continue;
+            }
+
+            let nd = match iface_node {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Extract extends for interfaces
+            let mut extends = Vec::new();
+            for child in children(nd) {
+                if child.kind() == "extends_interfaces" {
+                    for type_list in children(child) {
+                        if type_list.kind() == "type_list" {
+                            for type_node in children(type_list) {
+                                let iface_name = node_text(type_node, source).to_string();
+                                if !iface_name.is_empty() && iface_name != "," {
+                                    extends.push(iface_name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let decorators = java_extract_annotations(nd, source);
+
+            // Interface methods become fields (same pattern as Go interfaces)
+            let fields = body_node
+                .map(|b| java_extract_interface_method_signatures(source, b))
+                .unwrap_or_default();
+
+            structs.push(DiscoveredStruct {
+                name: name.to_string(),
+                start_line: nd.start_position().row + 1,
+                end_line: nd.end_position().row + 1,
+                fields,
+                file_path: file_path.to_string(),
+                extends,
+                implements: vec![],
+                decorators,
+            });
+        }
+    }
+
+    // Extract enum declarations
+    let enum_query_src = r#"
+        (enum_declaration
+          name: (identifier) @enum_name
+          body: (enum_body) @enum_body) @enum_node
+    "#;
+
+    if let Ok(query) = Query::new(&language, enum_query_src) {
+        let name_idx = query.capture_index_for_name("enum_name").unwrap();
+        let body_idx = query.capture_index_for_name("enum_body").unwrap();
+        let enum_node_idx = query.capture_index_for_name("enum_node").unwrap();
+        let mut cursor = QueryCursor::new();
+
+        let mut matches = cursor.matches(&query, tree.root_node(), source.as_bytes());
+        while let Some(m) = matches.next() {
+            let mut name = "";
+            let mut body_node = None;
+            let mut enum_node = None;
+
+            for cap in m.captures {
+                if cap.index == name_idx {
+                    name = node_text(cap.node, source);
+                } else if cap.index == body_idx {
+                    body_node = Some(cap.node);
+                } else if cap.index == enum_node_idx {
+                    enum_node = Some(cap.node);
+                }
+            }
+
+            if name.is_empty() {
+                continue;
+            }
+
+            let nd = match enum_node {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Extract enum constants as fields
+            let fields = body_node
+                .map(|b| {
+                    let mut constants = Vec::new();
+                    for child in children(b) {
+                        if child.kind() == "enum_constant" {
+                            if let Some(const_name) = child.child_by_field_name("name") {
+                                constants.push(Field {
+                                    name: node_text(const_name, source).to_string(),
+                                    field_type: "(enum)".to_string(),
+                                    required: true,
+                                    description: String::new(),
+                                });
+                            }
+                        }
+                    }
+                    constants
+                })
+                .unwrap_or_default();
+
+            let decorators = java_extract_annotations(nd, source);
+
+            structs.push(DiscoveredStruct {
+                name: name.to_string(),
+                start_line: nd.start_position().row + 1,
+                end_line: nd.end_position().row + 1,
+                fields,
+                file_path: file_path.to_string(),
+                extends: vec![],
+                implements: vec![],
+                decorators,
+            });
+        }
+    }
+
+    (structs, methods)
+}
+
+fn java_extract_fields(source: &str, class_body: Node) -> Vec<Field> {
+    let mut fields = Vec::new();
+    for child in children(class_body) {
+        if child.kind() != "field_declaration" {
+            continue;
+        }
+        let field_type = child
+            .child_by_field_name("type")
+            .map(|t| node_text(t, source).to_string())
+            .unwrap_or_default();
+        // Extract variable declarators
+        for decl_child in children(child) {
+            if decl_child.kind() == "variable_declarator" {
+                if let Some(name_node) = decl_child.child_by_field_name("name") {
+                    fields.push(Field {
+                        name: node_text(name_node, source).to_string(),
+                        field_type: field_type.clone(),
+                        required: true,
+                        description: String::new(),
+                    });
+                }
+            }
+        }
+    }
+    fields
+}
+
+fn java_extract_methods(
+    source: &str,
+    class_body: Node,
+    owner: &str,
+    file_path: &str,
+) -> Vec<DiscoveredMethod> {
+    let mut methods = Vec::new();
+    for child in children(class_body) {
+        if child.kind() != "method_declaration" {
+            continue;
+        }
+        let name = child
+            .child_by_field_name("name")
+            .map(|n| node_text(n, source).to_string())
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+
+        // Check visibility — skip private methods
+        let modifiers_text = children(child)
+            .filter(|c| c.kind() == "modifiers")
+            .map(|m| node_text(m, source))
+            .collect::<Vec<_>>()
+            .join(" ");
+        if modifiers_text.contains("private") {
+            continue;
+        }
+
+        let return_type = child
+            .child_by_field_name("type")
+            .map(|t| node_text(t, source).to_string())
+            .unwrap_or_else(|| "void".to_string());
+
+        let parameters = child
+            .child_by_field_name("parameters")
+            .map(|p| java_parse_params(source, p))
+            .unwrap_or_default();
+
+        let decorators = java_extract_annotations(child, source);
+
+        methods.push(DiscoveredMethod {
+            owner: owner.to_string(),
+            name,
+            start_line: child.start_position().row + 1,
+            end_line: child.end_position().row + 1,
+            parameters,
+            return_type,
+            file_path: file_path.to_string(),
+            extends: vec![],
+            implements: vec![],
+            decorators,
+        });
+    }
+    methods
+}
+
+fn java_extract_interface_method_signatures(source: &str, iface_body: Node) -> Vec<Field> {
+    let mut fields = Vec::new();
+    for child in children(iface_body) {
+        if child.kind() == "method_declaration" {
+            let name = child
+                .child_by_field_name("name")
+                .map(|n| node_text(n, source).to_string())
+                .unwrap_or_default();
+            let return_type = child
+                .child_by_field_name("type")
+                .map(|t| node_text(t, source).to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let params = child
+                    .child_by_field_name("parameters")
+                    .map(|p| node_text(p, source).to_string())
+                    .unwrap_or_default();
+                fields.push(Field {
+                    name,
+                    field_type: format!("{params} -> {return_type}"),
+                    required: true,
+                    description: String::new(),
+                });
+            }
+        }
+    }
+    fields
+}
+
+fn java_extract_annotations(node: Node, source: &str) -> Vec<String> {
+    let mut decorators = Vec::new();
+    // Look for marker_annotation and annotation siblings before the declaration
+    if let Some(parent) = node.parent() {
+        for child in children(parent) {
+            if child.id() == node.id() {
+                break;
+            }
+            if child.kind() == "marker_annotation" || child.kind() == "annotation" {
+                decorators.push(node_text(child, source).to_string());
+            }
+        }
+    }
+    // Also check inside modifiers
+    for child in children(node) {
+        if child.kind() == "modifiers" {
+            for mod_child in children(child) {
+                if mod_child.kind() == "marker_annotation" || mod_child.kind() == "annotation" {
+                    decorators.push(node_text(mod_child, source).to_string());
+                }
+            }
+        }
+    }
+    decorators
+}
+
+fn java_parse_params(source: &str, params_node: Node) -> Vec<Field> {
+    let mut fields = Vec::new();
+    for child in children(params_node) {
+        if child.kind() != "formal_parameter" && child.kind() != "spread_parameter" {
+            continue;
+        }
+        let field_type = child
+            .child_by_field_name("type")
+            .map(|t| node_text(t, source).to_string())
+            .unwrap_or_default();
+        let name = child
+            .child_by_field_name("name")
+            .map(|n| node_text(n, source).to_string())
+            .unwrap_or_default();
+        if !name.is_empty() {
+            fields.push(Field {
+                name,
+                field_type,
+                required: true,
+                description: String::new(),
+            });
+        }
+    }
+    fields
+}
+
+fn java_extract_calls(source: &str, tree: &tree_sitter::Tree) -> Vec<CallInfo> {
+    let query_str = "(method_invocation name: (identifier) @method)";
+    let lang = tree.language();
+    let query = match Query::new(&lang, query_str) {
+        Ok(q) => q,
+        Err(_) => return vec![],
+    };
+    let mut cursor = QueryCursor::new();
+    let mut calls = Vec::new();
+    let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    while let Some(m) = iter.next() {
+        for cap in m.captures {
+            let callee_name = node_text(cap.node, source).to_string();
+            let line = cap.node.start_position().row + 1;
+            // Check for object.method() pattern
+            let callee = if let Some(invocation) = cap.node.parent() {
+                if let Some(obj) = invocation.child_by_field_name("object") {
+                    format!("{}.{}", node_text(obj, source), callee_name)
+                } else {
+                    callee_name
+                }
+            } else {
+                callee_name
+            };
+            let caller = find_enclosing_function(cap.node, source, LangFamily::Java);
+            calls.push(CallInfo {
+                caller,
+                callee,
+                line,
+            });
+        }
+    }
+    calls
+}
+
+/// Java: extract `package <name>;` declaration as the module.
+fn java_extract_modules(source: &str, tree: &tree_sitter::Tree, file_path: &Path) -> Vec<DiscoveredModule> {
+    let query_str = "(package_declaration) @pkg";
+    let lang = tree.language();
+    let query = match Query::new(&lang, query_str) {
+        Ok(q) => q,
+        Err(_) => return vec![],
+    };
+    let mut cursor = QueryCursor::new();
+    let mut iter = cursor.matches(&query, tree.root_node(), source.as_bytes());
+    if let Some(m) = iter.next() {
+        if let Some(cap) = m.captures.first() {
+            let raw = node_text(cap.node, source);
+            // Strip `package ` prefix and trailing `;`
+            let pkg_name = raw
+                .trim_start_matches("package ")
+                .trim_end_matches(';')
+                .trim()
+                .to_string();
+            if !pkg_name.is_empty() {
+                return vec![DiscoveredModule {
+                    name: pkg_name,
+                    public: true,
+                    file_path: file_path.to_string_lossy().to_string(),
+                    extends: vec![],
+                    implements: vec![],
+                    decorators: vec![],
+                }];
+            }
+        }
+    }
+    vec![]
+}
+
 // ─── Module extraction ─────────────────────────────────────────────────────────────
 
 use super::analyze::DiscoveredModule;
@@ -1473,6 +2001,7 @@ impl AstScanner for TreeSitterScanner {
             LangFamily::Python => python_extract_imports(source_code, &tree),
             LangFamily::TypeScript => ts_extract_imports(source_code, &tree),
             LangFamily::Go => go_extract_imports(source_code, &tree),
+            LangFamily::Java => java_extract_imports(source_code, &tree),
         };
 
         let deps = raw_imports
@@ -1498,12 +2027,14 @@ impl AstScanner for TreeSitterScanner {
             LangFamily::Python => python_extract_classes(source_code, &tree, &fp),
             LangFamily::TypeScript => ts_extract_classes(source_code, &tree, &fp),
             LangFamily::Go => go_extract_structs_and_methods(source_code, &tree, &fp),
+            LangFamily::Java => java_extract_classes(source_code, &tree, &fp),
         };
 
         let modules = match family {
             LangFamily::Python => python_extract_modules(file_path),
             LangFamily::TypeScript => ts_extract_modules(source_code, &tree, file_path),
             LangFamily::Go => go_extract_modules(source_code, &tree, file_path),
+            LangFamily::Java => java_extract_modules(source_code, &tree, file_path),
         };
 
         Ok((structs, vec![], methods, modules))
@@ -1519,6 +2050,7 @@ impl AstScanner for TreeSitterScanner {
             LangFamily::Python => python_extract_calls(source_code, &tree),
             LangFamily::TypeScript => ts_extract_calls(source_code, &tree),
             LangFamily::Go => go_extract_calls(source_code, &tree),
+            LangFamily::Java => java_extract_calls(source_code, &tree),
         };
 
         Ok(calls)
